@@ -284,6 +284,19 @@ export function generateStatementRunData({
     list.push(costId)
     appliedCostIdsMap.set(key, list)
   }
+  const rebuildStatementTotalsFromLines = () => {
+    const earnings = new Map<Key, number>()
+    const deductions = new Map<Key, number>()
+    for (const [key, lines] of Array.from(pendingLines.entries())) {
+      for (const line of lines) {
+        const netAmount = Number(line.net_amount ?? 0)
+        const deductionAmount = Number(line.deduction_amount ?? 0)
+        if (netAmount > 0) earnings.set(key, roundMoney((earnings.get(key) ?? 0) + netAmount))
+        if (deductionAmount > 0) deductions.set(key, roundMoney((deductions.get(key) ?? 0) + deductionAmount))
+      }
+    }
+    return { earnings, deductions }
+  }
   const excludeRow = (
     row: ImportRow,
     reason: string,
@@ -656,16 +669,17 @@ export function generateStatementRunData({
     }
   }
 
+  const rebuiltTotals = rebuildStatementTotalsFromLines()
   const allKeys = Array.from(new Set([
-    ...Array.from(earningsMap.keys()),
-    ...Array.from(deductionsMap.keys()),
+    ...Array.from(rebuiltTotals.earnings.keys()),
+    ...Array.from(rebuiltTotals.deductions.keys()),
     ...Array.from(appliedCostIdsMap.keys()),
   ]))
   const drafts: StatementDraft[] = []
   for (const key of allKeys) {
     const [contract_id, payee_id] = key.split('::')
-    const earnings = earningsMap.get(key) ?? 0
-    const deductions = deductionsMap.get(key) ?? 0
+    const earnings = rebuiltTotals.earnings.get(key) ?? 0
+    const deductions = rebuiltTotals.deductions.get(key) ?? 0
 
     if (earnings === 0 && deductions === 0) {
       diagnostic.statements_skipped++

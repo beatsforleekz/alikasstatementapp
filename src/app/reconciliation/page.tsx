@@ -32,6 +32,7 @@ interface CoverageRow {
   onStatements: number
   unmatchedOrError: number
   excluded: number
+  roundingAdjustment: number
   difference: number
 }
 
@@ -230,6 +231,7 @@ export default function ReconciliationPage() {
   const [roundingAdjustmentTotal, setRoundingAdjustmentTotal] = useState(0)
   const [roundingAdjustmentCount, setRoundingAdjustmentCount] = useState(0)
   const [roundingAdjustmentCurrencies, setRoundingAdjustmentCurrencies] = useState<string[]>([])
+  const [roundingAdjustmentsByImport, setRoundingAdjustmentsByImport] = useState<Map<string, number>>(new Map())
   const [contracts, setContracts] = useState<any[]>([])
   const [payeeLinks, setPayeeLinks] = useState<any[]>([])
   const [splits, setSplits] = useState<any[]>([])
@@ -404,15 +406,23 @@ export default function ReconciliationPage() {
       setImportRows(rows)
       setStatementedRowIds(Array.from(new Set(lineRows.map(row => row.source_import_row_id).filter(Boolean) as string[])))
       const recordCurrencyById = new Map(currentRecords.map(record => [record.id, record.statement_currency ?? record.payee?.currency ?? defaultCurrencyForDomain(domainFilter)]))
+      const importIdByRowId = new Map(rows.map(row => [row.id, row.import_id]))
       const roundingLines = lineRows
         .map(row => ({
           delta: extractMinimumLineRoundingDelta(row.notes),
           currency: recordCurrencyById.get(row.statement_record_id) ?? defaultCurrencyForDomain(domainFilter),
+          importId: row.source_import_row_id ? importIdByRowId.get(row.source_import_row_id) ?? null : null,
         }))
         .filter(row => row.delta > 0)
+      const roundingByImport = new Map<string, number>()
+      for (const row of roundingLines) {
+        if (!row.importId) continue
+        roundingByImport.set(row.importId, (roundingByImport.get(row.importId) ?? 0) + row.delta)
+      }
       setRoundingAdjustmentTotal(roundingLines.reduce((sum, row) => sum + row.delta, 0))
       setRoundingAdjustmentCount(roundingLines.length)
       setRoundingAdjustmentCurrencies(roundingLines.map(row => row.currency))
+      setRoundingAdjustmentsByImport(roundingByImport)
       setContracts(contracts)
       setPayeeLinks(payeeLinks)
       setSplits(splits)
@@ -429,6 +439,7 @@ export default function ReconciliationPage() {
       setRoundingAdjustmentTotal(0)
       setRoundingAdjustmentCount(0)
       setRoundingAdjustmentCurrencies([])
+      setRoundingAdjustmentsByImport(new Map())
       setContracts([])
       setPayeeLinks([])
       setSplits([])
@@ -453,6 +464,7 @@ export default function ReconciliationPage() {
       payeeLinks,
       splits,
       links: contractRepertoireLinks,
+      roundingAdjustmentsByImport,
       fallbackCurrency: defaultCurrencyForDomain(domainFilter),
     })
   })()
@@ -625,6 +637,14 @@ export default function ReconciliationPage() {
               accent={currentSummary.unmatchedOrError.total !== 0 ? 'amber' : 'default'}
             />
             <ReconStatCard
+              label="Rounding Adjustment"
+              value={roundingAdjustmentValue}
+              sub={roundingAdjustmentCount > 0
+                ? `${roundingAdjustmentCount.toLocaleString()} tiny line item${roundingAdjustmentCount !== 1 ? 's' : ''} rescued to 0.01`
+                : 'No minimum line rounding applied'}
+              accent={roundingAdjustmentTotal !== 0 ? 'amber' : 'default'}
+            />
+            <ReconStatCard
               label="Excluded"
               value={formatAggregateAmount(currentSummary.excluded.total, currentSummary.excluded.currencies, defaultCurrencyForDomain(domainFilter))}
               sub="Explicitly excluded rows"
@@ -646,7 +666,7 @@ export default function ReconciliationPage() {
             </div>
             <div className="card-body space-y-2 text-sm">
               <div className="text-ops-text">
-                Import Total = On Statements + Unmatched / Errors + Excluded + Unclassified Difference
+                Import Total = On Statements + Unmatched / Errors + Excluded + Rounding Adjustment + Unclassified Difference
               </div>
               <div className="text-xs text-ops-muted">
                 {formatAggregateAmount(currentSummary.importTotal.total, currentSummary.importTotal.currencies, defaultCurrencyForDomain(domainFilter))}
@@ -657,13 +677,11 @@ export default function ReconciliationPage() {
                 {' + '}
                 {formatAggregateAmount(currentSummary.excluded.total, currentSummary.excluded.currencies, defaultCurrencyForDomain(domainFilter))}
                 {' + '}
+                {roundingAdjustmentValue}
+                {' + '}
                 {formatAggregateAmount(currentSummary.difference.total, currentSummary.difference.currencies, defaultCurrencyForDomain(domainFilter))}
               </div>
-              {roundingAdjustmentTotal > 0 && (
-                <div className="text-xs text-amber-700">
-                  Minimum line rounding added {roundingAdjustmentValue} across {roundingAdjustmentCount.toLocaleString()} tiny positive line item{roundingAdjustmentCount !== 1 ? 's' : ''}. This can create a small reconciliation difference versus raw import value.
-                </div>
-              )}
+              {roundingAdjustmentTotal > 0 && <div className="text-xs text-amber-700">Minimum line rounding is now tracked explicitly instead of sitting in unclassified difference.</div>}
             </div>
           </div>
 
@@ -715,6 +733,7 @@ export default function ReconciliationPage() {
                       <th>On Statements</th>
                       <th>Unmatched / Errors</th>
                       <th>Excluded</th>
+                      <th>Rounding</th>
                       <th>Unclassified</th>
                     </tr>
                   </thead>
@@ -731,6 +750,7 @@ export default function ReconciliationPage() {
                         <td><Num val={row.onStatements} currency={row.currencyLabel} /></td>
                         <td><Num val={row.unmatchedOrError} currency={row.currencyLabel} /></td>
                         <td><Num val={row.excluded} currency={row.currencyLabel} /></td>
+                        <td><Num val={row.roundingAdjustment} currency={row.currencyLabel} /></td>
                         <td><Num val={row.difference} currency={row.currencyLabel} bold /></td>
                       </tr>
                     ))}
@@ -950,6 +970,7 @@ function buildReconciliationData({
   payeeLinks,
   splits,
   links,
+  roundingAdjustmentsByImport,
   fallbackCurrency,
 }: {
   imports: ReconImport[]
@@ -959,6 +980,7 @@ function buildReconciliationData({
   payeeLinks: any[]
   splits: any[]
   links: ContractRepertoireAllocationLink[]
+  roundingAdjustmentsByImport: Map<string, number>
   fallbackCurrency: string
 }) {
   const importById = new Map(imports.map(item => [item.id, item]))
@@ -994,6 +1016,7 @@ function buildReconciliationData({
       onStatements: 0,
       unmatchedOrError: 0,
       excluded: 0,
+      roundingAdjustment: 0,
       difference: 0,
     }
 
@@ -1023,7 +1046,8 @@ function buildReconciliationData({
   const coverageRows = Array.from(coverageMap.values())
     .map(row => ({
       ...row,
-      difference: row.importTotal - row.onStatements - row.unmatchedOrError - row.excluded,
+      roundingAdjustment: roundingAdjustmentsByImport.get(row.importId) ?? 0,
+      difference: row.importTotal - row.onStatements - row.unmatchedOrError - row.excluded - (roundingAdjustmentsByImport.get(row.importId) ?? 0),
     }))
     .sort((a, b) => a.importName.localeCompare(b.importName))
 
