@@ -140,7 +140,6 @@ interface StatementGenerationInput {
 }
 
 const roundMoney = (value: number) => Math.round(value * 100) / 100
-const MINIMUM_POSITIVE_LINE_AMOUNT = 0.01
 
 const addUnique = (arr: string[], message: string) => {
   if (!arr.includes(message)) arr.push(message)
@@ -152,13 +151,6 @@ const describeRow = (row: ImportRow): string => {
   const title = row.title_raw?.trim() || row.identifier_raw?.trim() || 'untitled row'
   const incomeType = row.income_type ? ` · ${row.income_type}` : ''
   return `${importRef} · ${rowNumber} · ${title}${incomeType}`
-}
-
-const buildRoundingAdjustedNotes = (notes: string | null | undefined, rawAmount: number, finalAmount: number) => {
-  const delta = roundMoney(finalAmount - rawAmount)
-  if (delta <= 0) return notes ?? null
-  const suffix = `minimum_line_rounding_delta=${delta.toFixed(2)}`
-  return notes ? `${notes} · ${suffix}` : suffix
 }
 
 export function generateStatementRunData({
@@ -284,19 +276,6 @@ export function generateStatementRunData({
     list.push(costId)
     appliedCostIdsMap.set(key, list)
   }
-  const rebuildStatementTotalsFromLines = () => {
-    const earnings = new Map<Key, number>()
-    const deductions = new Map<Key, number>()
-    for (const [key, lines] of Array.from(pendingLines.entries())) {
-      for (const line of lines) {
-        const netAmount = Number(line.net_amount ?? 0)
-        const deductionAmount = Number(line.deduction_amount ?? 0)
-        if (netAmount > 0) earnings.set(key, roundMoney((earnings.get(key) ?? 0) + netAmount))
-        if (deductionAmount > 0) deductions.set(key, roundMoney((deductions.get(key) ?? 0) + deductionAmount))
-      }
-    }
-    return { earnings, deductions }
-  }
   const excludeRow = (
     row: ImportRow,
     reason: string,
@@ -355,9 +334,7 @@ export function generateStatementRunData({
       const isDeduction = row.row_type === 'deduction'
       const rawArtistAmount = grossAmount * artistShare
       const roundedArtistAmount = roundMoney(rawArtistAmount)
-      const artistAmount = !isDeduction && rawArtistAmount > 0 && roundedArtistAmount === 0
-        ? MINIMUM_POSITIVE_LINE_AMOUNT
-        : roundedArtistAmount
+      const artistAmount = roundedArtistAmount
 
       if (isDeduction) {
         deductionsMap.set(key, (deductionsMap.get(key) ?? 0) + Math.abs(roundedArtistAmount))
@@ -382,11 +359,7 @@ export function generateStatementRunData({
         split_percent_applied: artistShare,
         rate_applied: artistShare,
         pre_split_amount: grossAmount,
-        notes: buildRoundingAdjustedNotes(
-          `master:artist_share=${(artistShare * 100).toFixed(4)}%`,
-          rawArtistAmount,
-          artistAmount
-        ),
+        notes: `master:artist_share=${(artistShare * 100).toFixed(4)}%`,
       })
     }
   } else {
@@ -457,9 +430,7 @@ export function generateStatementRunData({
           const sourceAmount = resolveAmount(row, key)
           const rawAllocation = sourceAmount * route.allocation_multiplier
           const roundedAllocation = roundMoney(rawAllocation)
-          const allocation = !isDeduction && rawAllocation > 0 && roundedAllocation === 0
-            ? MINIMUM_POSITIVE_LINE_AMOUNT
-            : roundedAllocation
+          const allocation = roundedAllocation
           if (allocation === 0) continue
 
           if (isDeduction) {
@@ -484,7 +455,7 @@ export function generateStatementRunData({
             split_percent_applied: route.split_percent_applied,
             rate_applied: route.rate_applied,
             pre_split_amount: sourceAmount,
-            notes: buildRoundingAdjustedNotes(route.notes, rawAllocation, allocation),
+            notes: route.notes,
           })
           wroteLine = true
         }
@@ -572,9 +543,7 @@ export function generateStatementRunData({
         const sourceAmount = resolveAmount(row, key)
         const rawAllocation = sourceAmount * route.allocation_multiplier
         const roundedAllocation = roundMoney(rawAllocation)
-        const allocation = !isDeduction && rawAllocation > 0 && roundedAllocation === 0
-          ? MINIMUM_POSITIVE_LINE_AMOUNT
-          : roundedAllocation
+        const allocation = roundedAllocation
         if (allocation === 0) continue
 
         if (isDeduction) {
@@ -599,7 +568,7 @@ export function generateStatementRunData({
           split_percent_applied: route.split_percent_applied,
           rate_applied: route.rate_applied,
           pre_split_amount: sourceAmount,
-          notes: buildRoundingAdjustedNotes(route.notes, rawAllocation, allocation),
+          notes: route.notes,
         })
         wroteLine = true
       }
@@ -669,17 +638,16 @@ export function generateStatementRunData({
     }
   }
 
-  const rebuiltTotals = rebuildStatementTotalsFromLines()
   const allKeys = Array.from(new Set([
-    ...Array.from(rebuiltTotals.earnings.keys()),
-    ...Array.from(rebuiltTotals.deductions.keys()),
+    ...Array.from(earningsMap.keys()),
+    ...Array.from(deductionsMap.keys()),
     ...Array.from(appliedCostIdsMap.keys()),
   ]))
   const drafts: StatementDraft[] = []
   for (const key of allKeys) {
     const [contract_id, payee_id] = key.split('::')
-    const earnings = rebuiltTotals.earnings.get(key) ?? 0
-    const deductions = rebuiltTotals.deductions.get(key) ?? 0
+    const earnings = earningsMap.get(key) ?? 0
+    const deductions = deductionsMap.get(key) ?? 0
 
     if (earnings === 0 && deductions === 0) {
       diagnostic.statements_skipped++
