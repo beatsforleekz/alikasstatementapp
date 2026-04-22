@@ -1,0 +1,331 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   OPS DESIGN SYSTEM — Light / Dark theming
+   Default: Light (calm, professional, operations-grade)
+   Toggle: .dark class on <html>
+   ============================================================ */
+
+/* ---- Light theme (default) ---- */
+:root {
+  --ops-bg:           #f2f4f7;
+  --ops-surface:      #ffffff;
+  --ops-surface-2:    #eef0f4;
+  --ops-border:       #d8dce6;
+  --ops-border-hover: #b2bacb;
+  --ops-text:         #18202e;
+  --ops-muted:        #55627a;
+  --ops-subtle:       #96a0b2;
+
+  --sidebar-bg:       #f8f9fb;
+  --sidebar-border:   #d8dce6;
+  --sidebar-text:     #333d4f;
+  --sidebar-muted:    #667087;
+  --sidebar-active-bg:#eef4ff;
+  --sidebar-active:   #2563eb;
+
+  --accent-blue:      #2563eb;
+  --accent-green:     #16a34a;
+  --accent-amber:     #d97706;
+  --accent-red:       #dc2626;
+  --accent-purple:    #7c3aed;
+  --accent-cyan:      #0891b2;
+
+  /* Severity colours — light mode */
+  --sev-critical-bg:  #fef2f2;
+  --sev-critical-text:#b91c1c;
+  --sev-critical-border:#fca5a5;
+  --sev-warning-bg:   #fffbeb;
+  --sev-warning-text: #92400e;
+  --sev-warning-border:#fcd34d;
+  --sev-info-bg:      #eff6ff;
+  --sev-info-text:    #1d4ed8;
+  --sev-info-border:  #bfdbfe;
+}
+
+/* ---- Dark theme ---- */
+html.dark {
+  --ops-bg:           #16181e;
+  --ops-surface:      #1e2028;
+  --ops-surface-2:    #252832;
+  --ops-border:       #2e3344;
+  --ops-border-hover: #424a60;
+  --ops-text:         #dde3ed;
+  --ops-muted:        #8896b0;
+  --ops-subtle:       #505a72;
+
+  --sidebar-bg:       #1a1d25;
+  --sidebar-border:   #2a2f3e;
+  --sidebar-text:     #c8d3e8;
+  --sidebar-muted:    #7e8fa8;
+  --sidebar-active-bg:#1e3552;
+  --sidebar-active:   #5ba4f5;
+
+  --accent-blue:      #3b82f6;
+  --accent-green:     #22c55e;
+  --accent-amber:     #f59e0b;
+  --accent-red:       #ef4444;
+  --accent-purple:    #a855f7;
+  --accent-cyan:      #06b6d4;
+
+  /* Severity colours — dark mode */
+  --sev-critical-bg:  rgba(220,38,38,0.15);
+  --sev-critical-text:#fca5a5;
+  --sev-critical-border:rgba(220,38,38,0.4);
+  --sev-warning-bg:   rgba(217,119,6,0.15);
+  --sev-warning-text: #fcd34d;
+  --sev-warning-border:rgba(217,119,6,0.4);
+  --sev-info-bg:      rgba(37,99,235,0.15);
+  --sev-info-text:    #93c5fd;
+  --sev-info-border:  rgba(37,99,235,0.4);
+}
+
+/* ============================================================
+   BASE
+   ============================================================ */
+html, body {
+  background-color: var(--ops-bg);
+  color: var(--ops-text);
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--ops-bg); }
+::-webkit-scrollbar-thumb { background: var(--ops-border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--ops-border-hover); }
+
+*:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+}
+
+.tabular-nums {
+  font-family: 'IBM Plex Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================
+   COMPONENT CLASSES
+   ============================================================ */
+@layer components {
+
+  /* ---- Buttons ---- */
+  .btn {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium transition-colors cursor-pointer select-none whitespace-nowrap;
+  }
+  .btn-primary {
+    @apply btn bg-blue-600 hover:bg-blue-700 text-white;
+  }
+  .btn-secondary {
+    @apply btn border text-sm font-medium transition-colors;
+    background-color: var(--ops-surface);
+    border-color: var(--ops-border);
+    color: var(--ops-text);
+  }
+  .btn-secondary:hover {
+    background-color: var(--ops-surface-2);
+    border-color: var(--ops-border-hover);
+  }
+  .btn-ghost {
+    @apply btn;
+    color: var(--ops-muted);
+  }
+  .btn-ghost:hover {
+    background-color: var(--ops-surface-2);
+    color: var(--ops-text);
+  }
+  .btn-danger {
+    @apply btn border;
+    background-color: color-mix(in srgb, var(--accent-red) 12%, transparent);
+    color: var(--accent-red);
+    border-color: color-mix(in srgb, var(--accent-red) 30%, transparent);
+  }
+  .btn-success {
+    @apply btn border;
+    background-color: color-mix(in srgb, var(--accent-green) 12%, transparent);
+    color: var(--accent-green);
+    border-color: color-mix(in srgb, var(--accent-green) 30%, transparent);
+  }
+  .btn-sm { @apply px-2 py-1 text-xs; }
+  .btn-icon {
+    @apply p-1.5 rounded transition-colors cursor-pointer;
+    color: var(--ops-muted);
+  }
+  .btn-icon:hover {
+    background-color: var(--ops-surface-2);
+    color: var(--ops-text);
+  }
+
+  /* ---- Cards ---- */
+  .card {
+    @apply rounded-lg border;
+    background-color: var(--ops-surface);
+    border-color: var(--ops-border);
+  }
+  .card-header {
+    @apply px-4 py-3 border-b flex items-center justify-between;
+    border-color: var(--ops-border);
+  }
+  .card-body { @apply p-4; }
+
+  /* ---- Tables ---- */
+  .ops-table { @apply w-full text-sm; }
+  .ops-table th {
+    @apply px-3 py-2 text-left text-xs font-semibold uppercase tracking-wider border-b sticky top-0;
+    color: var(--ops-muted);
+    border-color: var(--ops-border);
+    background-color: var(--ops-surface);
+  }
+  .ops-table td {
+    @apply px-3 py-2.5 border-b;
+    border-color: color-mix(in srgb, var(--ops-border) 60%, transparent);
+  }
+  .ops-table tr:hover td { background-color: var(--ops-surface-2); }
+  .ops-table tr:last-child td { @apply border-b-0; }
+
+  /* ---- Form inputs ---- */
+  .ops-input {
+    @apply w-full rounded px-3 py-1.5 text-sm transition-colors border;
+    background-color: var(--ops-surface);
+    border-color: var(--ops-border);
+    color: var(--ops-text);
+  }
+  .ops-input::placeholder { color: var(--ops-subtle); }
+  .ops-input:focus {
+    outline: none;
+    border-color: var(--accent-blue);
+  }
+  .ops-select { @apply ops-input cursor-pointer; }
+  .ops-label {
+    @apply block text-xs font-semibold uppercase tracking-wider mb-1;
+    color: var(--ops-muted);
+  }
+  .ops-field { @apply space-y-1; }
+  .ops-textarea { @apply ops-input resize-y min-h-[80px]; }
+
+  /* ---- Badges ---- */
+  .badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold;
+  }
+  .badge-payable {
+    @apply badge;
+    background-color: color-mix(in srgb, var(--accent-green) 15%, transparent);
+    color: var(--accent-green);
+    border: 1px solid color-mix(in srgb, var(--accent-green) 35%, transparent);
+  }
+  .badge-recouping {
+    @apply badge;
+    background-color: color-mix(in srgb, var(--accent-amber) 15%, transparent);
+    color: var(--accent-amber);
+    border: 1px solid color-mix(in srgb, var(--accent-amber) 35%, transparent);
+  }
+  .badge-approved {
+    @apply badge;
+    background-color: color-mix(in srgb, var(--accent-blue) 15%, transparent);
+    color: var(--accent-blue);
+    border: 1px solid color-mix(in srgb, var(--accent-blue) 35%, transparent);
+  }
+  .badge-pending {
+    @apply badge border;
+    background-color: var(--ops-surface-2);
+    color: var(--ops-muted);
+    border-color: var(--ops-border);
+  }
+  .badge-rejected {
+    @apply badge;
+    background-color: color-mix(in srgb, var(--accent-red) 15%, transparent);
+    color: var(--accent-red);
+    border: 1px solid color-mix(in srgb, var(--accent-red) 35%, transparent);
+  }
+  .badge-sent {
+    @apply badge;
+    background-color: color-mix(in srgb, var(--accent-cyan) 15%, transparent);
+    color: var(--accent-cyan);
+    border: 1px solid color-mix(in srgb, var(--accent-cyan) 35%, transparent);
+  }
+
+  /* Severity badges — use CSS vars so they shift in both themes */
+  .badge-critical {
+    @apply badge;
+    background-color: var(--sev-critical-bg);
+    color: var(--sev-critical-text);
+    border: 1px solid var(--sev-critical-border);
+  }
+  .badge-warning {
+    @apply badge;
+    background-color: var(--sev-warning-bg);
+    color: var(--sev-warning-text);
+    border: 1px solid var(--sev-warning-border);
+  }
+  .badge-info {
+    @apply badge;
+    background-color: var(--sev-info-bg);
+    color: var(--sev-info-text);
+    border: 1px solid var(--sev-info-border);
+  }
+
+  .badge-master {
+    @apply badge;
+    background-color: color-mix(in srgb, var(--accent-purple) 15%, transparent);
+    color: var(--accent-purple);
+    border: 1px solid color-mix(in srgb, var(--accent-purple) 35%, transparent);
+  }
+  .badge-publishing {
+    @apply badge;
+    background-color: color-mix(in srgb, var(--accent-cyan) 15%, transparent);
+    color: var(--accent-cyan);
+    border: 1px solid color-mix(in srgb, var(--accent-cyan) 35%, transparent);
+  }
+  .badge-hold {
+    @apply badge;
+    background-color: color-mix(in srgb, var(--accent-red) 25%, transparent);
+    color: var(--accent-red);
+    border: 1px solid color-mix(in srgb, var(--accent-red) 50%, transparent);
+    font-weight: 700;
+  }
+
+  /* ---- Stat cards ---- */
+  .stat-card { @apply card p-4 flex flex-col gap-1; }
+  .stat-value { @apply text-2xl font-bold font-mono; }
+  .stat-label { @apply text-xs uppercase tracking-wider; color: var(--ops-muted); }
+
+  /* ---- Page layout ---- */
+  .page-header { @apply flex items-center justify-between mb-6; }
+  .page-title { @apply text-xl font-bold; color: var(--ops-text); }
+  .page-subtitle { @apply text-sm mt-0.5; color: var(--ops-muted); }
+
+  /* ---- Empty state ---- */
+  .empty-state { @apply flex flex-col items-center justify-center py-16 text-center; }
+  .empty-state-title { @apply text-sm font-semibold mt-3; color: var(--ops-muted); }
+  .empty-state-desc { @apply text-xs mt-1; color: var(--ops-subtle); }
+
+  .ops-divider { @apply border-t; border-color: var(--ops-border); }
+  .ops-mono { @apply font-mono text-xs; color: var(--ops-muted); }
+  .amount-positive { @apply font-mono tabular-nums; color: var(--accent-green); }
+  .amount-negative { @apply font-mono tabular-nums; color: var(--accent-red); }
+  .amount-neutral { @apply font-mono tabular-nums; color: var(--ops-text); }
+  .section-title { @apply text-xs font-bold uppercase tracking-widest; color: var(--ops-muted); }
+}
+
+/* ============================================================
+   CSS-VAR UTILITY CLASSES (Tailwind can't see vars directly)
+   ============================================================ */
+.bg-ops-bg           { background-color: var(--ops-bg); }
+.bg-ops-surface      { background-color: var(--ops-surface); }
+.bg-ops-surface-2    { background-color: var(--ops-surface-2); }
+.border-ops-border   { border-color: var(--ops-border); }
+.border-ops-border-hover { border-color: var(--ops-border-hover); }
+.text-ops-text       { color: var(--ops-text); }
+.text-ops-muted      { color: var(--ops-muted); }
+.text-ops-subtle     { color: var(--ops-subtle); }
+.bg-sidebar          { background-color: var(--sidebar-bg); }
+.border-sidebar      { border-color: var(--sidebar-border); }
+.text-sidebar        { color: var(--sidebar-text); }
+.text-sidebar-muted  { color: var(--sidebar-muted); }

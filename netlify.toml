@@ -1,0 +1,19 @@
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "20"
+  NEXT_TELEMETRY_DISABLED = "1"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+# Environment variables are set in Netlify UI or via netlify env:set
+# Required:
+#   NEXT_PUBLIC_SUPABASE_URL
+#   NEXT_PUBLIC_SUPABASE_ANON_KEY
+#   SUPABASE_SERVICE_ROLE_KEY
+
+# All routes handled by Next.js via the Netlify plugin
+# No manual redirect rules needed — plugin handles SSR, API routes, etc.
