@@ -154,13 +154,6 @@ const describeRow = (row: ImportRow): string => {
   return `${importRef} · ${rowNumber} · ${title}${incomeType}`
 }
 
-const finalizePositiveLineAmount = (rawAmount: number) => {
-  if (rawAmount <= 0) return roundMoney(rawAmount)
-  const rounded = roundMoney(rawAmount)
-  if (rounded > 0) return rounded
-  return MINIMUM_POSITIVE_LINE_AMOUNT
-}
-
 const buildRoundingAdjustedNotes = (notes: string | null | undefined, rawAmount: number, finalAmount: number) => {
   const delta = roundMoney(finalAmount - rawAmount)
   if (delta <= 0) return notes ?? null
@@ -291,20 +284,6 @@ export function generateStatementRunData({
     list.push(costId)
     appliedCostIdsMap.set(key, list)
   }
-  const rebuildStatementTotalsFromLines = () => {
-    const earnings = new Map<Key, number>()
-    const deductions = new Map<Key, number>()
-    for (const [key, lines] of Array.from(pendingLines.entries())) {
-      for (const line of lines) {
-        const netAmount = Number(line.net_amount ?? 0)
-        const deductionAmount = Number(line.deduction_amount ?? 0)
-        if (netAmount > 0) earnings.set(key, roundMoney((earnings.get(key) ?? 0) + netAmount))
-        if (deductionAmount > 0) deductions.set(key, roundMoney((deductions.get(key) ?? 0) + deductionAmount))
-      }
-    }
-    return { earnings, deductions }
-  }
-
   const excludeRow = (
     row: ImportRow,
     reason: string,
@@ -362,12 +341,15 @@ export function generateStatementRunData({
       const grossAmount = resolveAmount(row, key)
       const isDeduction = row.row_type === 'deduction'
       const rawArtistAmount = grossAmount * artistShare
-      const artistAmount = isDeduction ? roundMoney(rawArtistAmount) : finalizePositiveLineAmount(rawArtistAmount)
+      const roundedArtistAmount = roundMoney(rawArtistAmount)
+      const artistAmount = !isDeduction && rawArtistAmount > 0 && roundedArtistAmount === 0
+        ? MINIMUM_POSITIVE_LINE_AMOUNT
+        : roundedArtistAmount
 
       if (isDeduction) {
-        deductionsMap.set(key, (deductionsMap.get(key) ?? 0) + Math.abs(artistAmount))
+        deductionsMap.set(key, (deductionsMap.get(key) ?? 0) + Math.abs(roundedArtistAmount))
       } else {
-        earningsMap.set(key, (earningsMap.get(key) ?? 0) + artistAmount)
+        earningsMap.set(key, (earningsMap.get(key) ?? 0) + roundedArtistAmount)
       }
 
       diagnostic.rows_statement_ready++
@@ -461,13 +443,16 @@ export function generateStatementRunData({
           const key = `${route.contract_id}::${route.payee_id}`
           const sourceAmount = resolveAmount(row, key)
           const rawAllocation = sourceAmount * route.allocation_multiplier
-          const allocation = isDeduction ? roundMoney(rawAllocation) : finalizePositiveLineAmount(rawAllocation)
+          const roundedAllocation = roundMoney(rawAllocation)
+          const allocation = !isDeduction && rawAllocation > 0 && roundedAllocation === 0
+            ? MINIMUM_POSITIVE_LINE_AMOUNT
+            : roundedAllocation
           if (allocation === 0) continue
 
           if (isDeduction) {
-            deductionsMap.set(key, (deductionsMap.get(key) ?? 0) + Math.abs(allocation))
+            deductionsMap.set(key, (deductionsMap.get(key) ?? 0) + Math.abs(roundedAllocation))
           } else {
-            earningsMap.set(key, (earningsMap.get(key) ?? 0) + allocation)
+            earningsMap.set(key, (earningsMap.get(key) ?? 0) + roundedAllocation)
           }
 
           addLine(key, {
@@ -573,13 +558,16 @@ export function generateStatementRunData({
         const key = `${route.contract_id}::${route.payee_id}`
         const sourceAmount = resolveAmount(row, key)
         const rawAllocation = sourceAmount * route.allocation_multiplier
-        const allocation = isDeduction ? roundMoney(rawAllocation) : finalizePositiveLineAmount(rawAllocation)
+        const roundedAllocation = roundMoney(rawAllocation)
+        const allocation = !isDeduction && rawAllocation > 0 && roundedAllocation === 0
+          ? MINIMUM_POSITIVE_LINE_AMOUNT
+          : roundedAllocation
         if (allocation === 0) continue
 
         if (isDeduction) {
-          deductionsMap.set(key, (deductionsMap.get(key) ?? 0) + Math.abs(allocation))
+          deductionsMap.set(key, (deductionsMap.get(key) ?? 0) + Math.abs(roundedAllocation))
         } else {
-          earningsMap.set(key, (earningsMap.get(key) ?? 0) + allocation)
+          earningsMap.set(key, (earningsMap.get(key) ?? 0) + roundedAllocation)
         }
 
         addLine(key, {
@@ -668,17 +656,16 @@ export function generateStatementRunData({
     }
   }
 
-  const rebuiltTotals = rebuildStatementTotalsFromLines()
   const allKeys = Array.from(new Set([
-    ...Array.from(rebuiltTotals.earnings.keys()),
-    ...Array.from(rebuiltTotals.deductions.keys()),
+    ...Array.from(earningsMap.keys()),
+    ...Array.from(deductionsMap.keys()),
     ...Array.from(appliedCostIdsMap.keys()),
   ]))
   const drafts: StatementDraft[] = []
   for (const key of allKeys) {
     const [contract_id, payee_id] = key.split('::')
-    const earnings = rebuiltTotals.earnings.get(key) ?? 0
-    const deductions = rebuiltTotals.deductions.get(key) ?? 0
+    const earnings = earningsMap.get(key) ?? 0
+    const deductions = deductionsMap.get(key) ?? 0
 
     if (earnings === 0 && deductions === 0) {
       diagnostic.statements_skipped++
