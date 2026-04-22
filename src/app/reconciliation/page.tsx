@@ -47,6 +47,12 @@ interface RowStatusMeta {
   hasMismatch: boolean
 }
 
+function extractMinimumLineRoundingDelta(notes: string | null | undefined) {
+  if (!notes) return 0
+  const match = notes.match(/minimum_line_rounding_delta=([0-9]+(?:\.[0-9]+)?)/)
+  return match ? Number(match[1]) : 0
+}
+
 function isPublishingStatementEligibleRow(
   row: Pick<ReconImportRow, 'domain' | 'match_status' | 'matched_repertoire_id'>,
   linkedRepertoireIds: Set<string>
@@ -221,6 +227,9 @@ export default function ReconciliationPage() {
   const [imports, setImports] = useState<ReconImport[]>([])
   const [importRows, setImportRows] = useState<ReconImportRow[]>([])
   const [statementedRowIds, setStatementedRowIds] = useState<string[]>([])
+  const [roundingAdjustmentTotal, setRoundingAdjustmentTotal] = useState(0)
+  const [roundingAdjustmentCount, setRoundingAdjustmentCount] = useState(0)
+  const [roundingAdjustmentCurrencies, setRoundingAdjustmentCurrencies] = useState<string[]>([])
   const [contracts, setContracts] = useState<any[]>([])
   const [payeeLinks, setPayeeLinks] = useState<any[]>([])
   const [splits, setSplits] = useState<any[]>([])
@@ -378,15 +387,15 @@ export default function ReconciliationPage() {
             .range(from, to)
         ),
         statementIds.length > 0
-          ? fetchAllPaged<{ source_import_row_id: string | null }>((from, to) =>
+          ? fetchAllPaged<{ source_import_row_id: string | null; notes: string | null; statement_record_id: string; net_amount: number | null; deduction_amount: number | null }>((from, to) =>
               supabase
                 .from('statement_line_summaries')
-                .select('source_import_row_id')
+                .select('statement_record_id, source_import_row_id, net_amount, deduction_amount, notes')
                 .in('statement_record_id', statementIds)
                 .order('statement_record_id')
                 .range(from, to)
             )
-          : Promise.resolve([] as { source_import_row_id: string | null }[]),
+          : Promise.resolve([] as { source_import_row_id: string | null; notes: string | null; statement_record_id: string; net_amount: number | null; deduction_amount: number | null }[]),
       ])
 
       setRecords(currentRecords)
@@ -394,6 +403,16 @@ export default function ReconciliationPage() {
       setImports(currentImports)
       setImportRows(rows)
       setStatementedRowIds(Array.from(new Set(lineRows.map(row => row.source_import_row_id).filter(Boolean) as string[])))
+      const recordCurrencyById = new Map(currentRecords.map(record => [record.id, record.statement_currency ?? record.payee?.currency ?? defaultCurrencyForDomain(domainFilter)]))
+      const roundingLines = lineRows
+        .map(row => ({
+          delta: extractMinimumLineRoundingDelta(row.notes),
+          currency: recordCurrencyById.get(row.statement_record_id) ?? defaultCurrencyForDomain(domainFilter),
+        }))
+        .filter(row => row.delta > 0)
+      setRoundingAdjustmentTotal(roundingLines.reduce((sum, row) => sum + row.delta, 0))
+      setRoundingAdjustmentCount(roundingLines.length)
+      setRoundingAdjustmentCurrencies(roundingLines.map(row => row.currency))
       setContracts(contracts)
       setPayeeLinks(payeeLinks)
       setSplits(splits)
@@ -407,6 +426,9 @@ export default function ReconciliationPage() {
       setImports([])
       setImportRows([])
       setStatementedRowIds([])
+      setRoundingAdjustmentTotal(0)
+      setRoundingAdjustmentCount(0)
+      setRoundingAdjustmentCurrencies([])
       setContracts([])
       setPayeeLinks([])
       setSplits([])
@@ -495,6 +517,11 @@ export default function ReconciliationPage() {
       ...records.filter(record => record.is_payable).map(record => record.statement_currency ?? record.payee?.currency ?? defaultCurrencyForDomain(domainFilter)),
       ...compareRecords.filter(record => record.is_payable).map(record => record.statement_currency ?? record.payee?.currency ?? defaultCurrencyForDomain(domainFilter)),
     ],
+    defaultCurrencyForDomain(domainFilter)
+  )
+  const roundingAdjustmentValue = formatAggregateAmount(
+    roundingAdjustmentTotal,
+    roundingAdjustmentCurrencies,
     defaultCurrencyForDomain(domainFilter)
   )
 
@@ -604,9 +631,11 @@ export default function ReconciliationPage() {
               accent={currentSummary.excluded.total !== 0 ? 'amber' : 'default'}
             />
             <ReconStatCard
-              label="Unclassified Difference"
+              label={roundingAdjustmentTotal > 0 ? 'Unclassified / Rounding Difference' : 'Unclassified Difference'}
               value={formatAggregateAmount(currentSummary.difference.total, currentSummary.difference.currencies, defaultCurrencyForDomain(domainFilter))}
-              sub="Anything not yet explained by a visible bucket"
+              sub={roundingAdjustmentTotal > 0
+                ? `Includes ${roundingAdjustmentValue} from minimum line rounding`
+                : 'Anything not yet explained by a visible bucket'}
               accent={currentSummary.difference.total !== 0 ? 'red' : 'default'}
             />
           </div>
@@ -630,6 +659,11 @@ export default function ReconciliationPage() {
                 {' + '}
                 {formatAggregateAmount(currentSummary.difference.total, currentSummary.difference.currencies, defaultCurrencyForDomain(domainFilter))}
               </div>
+              {roundingAdjustmentTotal > 0 && (
+                <div className="text-xs text-amber-700">
+                  Minimum line rounding added {roundingAdjustmentValue} across {roundingAdjustmentCount.toLocaleString()} tiny positive line item{roundingAdjustmentCount !== 1 ? 's' : ''}. This can create a small reconciliation difference versus raw import value.
+                </div>
+              )}
             </div>
           </div>
 
