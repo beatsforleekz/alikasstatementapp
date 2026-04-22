@@ -465,12 +465,12 @@ export function generateStatementRunData({
             retailer_channel: row.retailer ?? row.channel ?? null,
             territory: row.country_raw ?? null,
             quantity: row.quantity ?? null,
-            gross_amount: isDeduction ? 0 : roundMoney(sourceAmount * route.pre_split_multiplier),
+            gross_amount: isDeduction ? 0 : sourceAmount,
             net_amount: isDeduction ? 0 : allocation,
             deduction_amount: isDeduction ? Math.abs(allocation) : 0,
             split_percent_applied: route.split_percent_applied,
             rate_applied: route.rate_applied,
-            pre_split_amount: roundMoney(sourceAmount * route.pre_split_multiplier),
+            pre_split_amount: sourceAmount,
             notes: buildRoundingAdjustedNotes(route.notes, rawAllocation, allocation),
           })
           wroteLine = true
@@ -580,12 +580,12 @@ export function generateStatementRunData({
           retailer_channel: row.retailer ?? row.channel ?? null,
           territory: row.country_raw ?? null,
           quantity: row.quantity ?? null,
-          gross_amount: isDeduction ? 0 : roundMoney(sourceAmount * route.pre_split_multiplier),
+          gross_amount: isDeduction ? 0 : sourceAmount,
           net_amount: isDeduction ? 0 : allocation,
           deduction_amount: isDeduction ? Math.abs(allocation) : 0,
           split_percent_applied: route.split_percent_applied,
           rate_applied: route.rate_applied,
-          pre_split_amount: roundMoney(sourceAmount * route.pre_split_multiplier),
+          pre_split_amount: sourceAmount,
           notes: buildRoundingAdjustedNotes(route.notes, rawAllocation, allocation),
         })
         wroteLine = true
