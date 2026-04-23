@@ -26,6 +26,7 @@ import {
   generateStatementRunData,
   type StatementGenerationDiagnostic as RunDiagnostic,
   type StatementGenerationContractCost,
+  type StatementGenerationMicroAllocation,
   type StatementGenerationPreviousStatementCarryover,
 } from '@/lib/utils/statementGeneration'
 import type { StatementOutputData } from '@/lib/utils/outputGenerator'
@@ -1328,7 +1329,7 @@ export default function StatementRunPage() {
         ? periodsChronological[currentPeriodIndex + 1]?.id ?? null
         : null
 
-      const [lD, { data: cvD }, fcD, spD, crlD, costD, previousStatementRows] = await Promise.all([
+      const [lD, { data: cvD }, fcD, spD, crlD, costD, microAllocationRows, previousStatementRows] = await Promise.all([
         fetchAllPaged<any>((from, to) =>
           supabase
             .from('contract_payee_links')
@@ -1367,6 +1368,14 @@ export default function StatementRunPage() {
             .neq('applied_status', 'waived')
             .order('contract_id')
             .order('cost_date', { ascending: false })
+            .range(from, to)
+        ),
+        fetchAllPaged<StatementGenerationMicroAllocation>((from, to) =>
+          supabase
+            .from('micro_allocation_ledger')
+            .select('id, source_import_row_id, statement_period_id, contract_id, payee_id, domain, carry_key, title, identifier, income_type, currency, raw_amount, status')
+            .eq('domain', domain)
+            .order('carry_key')
             .range(from, to)
         ),
         previousPeriodId
@@ -1420,7 +1429,7 @@ export default function StatementRunPage() {
         return
       }
 
-      const { diagnostic: diag, drafts } = generateStatementRunData({
+      const { diagnostic: diag, drafts, microCarryRows } = generateStatementRunData({
         domain,
         statementPeriodId: selectedPeriodId,
         imports: (pi ?? []) as any[],
@@ -1430,6 +1439,7 @@ export default function StatementRunPage() {
         carryovers: (cvD ?? []) as any[],
         previousStatementCarryovers: previousStatementRows as StatementGenerationPreviousStatementCarryover[],
         contractCosts: costD as any[],
+        microAllocations: microAllocationRows as StatementGenerationMicroAllocation[],
         splits: spD as any[],
         contractRepertoireLinks: crlD as any[],
         outputCurrencyOverride,
@@ -1439,6 +1449,30 @@ export default function StatementRunPage() {
 
       const touchedRecordIds = new Set<string>()
       const carryoverLedgerRows: Array<Record<string, any>> = []
+      if (microCarryRows.length > 0) {
+        const rows = microCarryRows.map(row => ({
+          source_import_row_id: row.source_import_row_id,
+          statement_period_id: row.statement_period_id ?? selectedPeriodId,
+          contract_id: row.contract_id,
+          payee_id: row.payee_id,
+          domain: row.domain,
+          carry_key: row.carry_key,
+          title: row.title,
+          identifier: row.identifier,
+          income_type: row.income_type,
+          currency: row.currency,
+          raw_amount: row.raw_amount,
+          notes: 'Captured from statement run as sub-cent allocation',
+          updated_at: new Date().toISOString(),
+        }))
+        for (let i = 0; i < rows.length; i += 100) {
+          await supabase
+            .from('micro_allocation_ledger')
+            .upsert(rows.slice(i, i + 100), {
+              onConflict: 'source_import_row_id,contract_id,payee_id,carry_key',
+            })
+        }
+      }
       for (const draft of drafts) {
         const { data: existing } = await supabase.from('statement_records')
           .select('id, manual_override_flag, opening_balance, prior_period_carryover_applied, hold_payment_flag, override_notes, balance_confirmed_flag, carryover_confirmed_flag')
@@ -1541,6 +1575,39 @@ export default function StatementRunPage() {
               updated_at: new Date().toISOString(),
             })
             .in('id', draft.appliedCostIds)
+        }
+        if (draft.microCarryReleaseKeys.length > 0) {
+          await supabase
+            .from('micro_allocation_ledger')
+            .update({
+              status: 'released',
+              released_statement_record_id: recordId,
+              released_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              notes: 'Released into statement as accumulated micro allocation',
+            })
+            .in('carry_key', draft.microCarryReleaseKeys)
+            .eq('status', 'pending')
+          if (draft.microCarryResidualRows.length > 0) {
+            await supabase
+              .from('micro_allocation_ledger')
+              .insert(draft.microCarryResidualRows.map(row => ({
+                source_import_row_id: null,
+                statement_period_id: row.statement_period_id ?? selectedPeriodId,
+                contract_id: row.contract_id,
+                payee_id: row.payee_id,
+                domain: row.domain,
+                carry_key: row.carry_key,
+                title: row.title,
+                identifier: row.identifier,
+                income_type: row.income_type,
+                currency: row.currency,
+                raw_amount: row.raw_amount,
+                status: 'pending',
+                notes: 'Residual after micro allocation release',
+                updated_at: new Date().toISOString(),
+              })))
+          }
         }
       }
 

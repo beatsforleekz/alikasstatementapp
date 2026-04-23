@@ -49,6 +49,22 @@ export interface StatementGenerationContractCost {
   notes: string | null
 }
 
+export interface StatementGenerationMicroAllocation {
+  id?: string
+  source_import_row_id: string | null
+  statement_period_id?: string | null
+  contract_id: string
+  payee_id: string
+  domain: Domain
+  carry_key: string
+  title: string | null
+  identifier: string | null
+  income_type: string | null
+  currency: string
+  raw_amount: number
+  status?: 'pending' | 'released'
+}
+
 export interface StatementGenerationDiagnostic {
   imports_found: number
   rows_fetched: number
@@ -120,6 +136,8 @@ export interface StatementDraft {
   }
   lines: PendingStatementLine[]
   appliedCostIds: string[]
+  microCarryReleaseKeys: string[]
+  microCarryResidualRows: StatementGenerationMicroAllocation[]
 }
 
 interface StatementGenerationInput {
@@ -132,6 +150,7 @@ interface StatementGenerationInput {
   carryovers: StatementGenerationCarryover[]
   previousStatementCarryovers: StatementGenerationPreviousStatementCarryover[]
   contractCosts: StatementGenerationContractCost[]
+  microAllocations: StatementGenerationMicroAllocation[]
   splits: ContractRepertoirePayeeSplit[]
   contractRepertoireLinks: ContractRepertoireAllocationLink[]
   outputCurrencyOverride: string
@@ -140,6 +159,7 @@ interface StatementGenerationInput {
 }
 
 const roundMoney = (value: number) => Math.round(value * 100) / 100
+const MICRO_RELEASE_THRESHOLD = 0.01
 
 const addUnique = (arr: string[], message: string) => {
   if (!arr.includes(message)) arr.push(message)
@@ -153,6 +173,24 @@ const describeRow = (row: ImportRow): string => {
   return `${importRef} · ${rowNumber} · ${title}${incomeType}`
 }
 
+const buildMicroCarryKey = (parts: {
+  domain: Domain
+  contractId: string
+  payeeId: string
+  currency: string
+  incomeType: string | null | undefined
+  identifier: string | null | undefined
+  title: string | null | undefined
+}) => [
+  parts.domain,
+  parts.contractId,
+  parts.payeeId,
+  parts.currency,
+  (parts.incomeType ?? 'other').trim().toLowerCase(),
+  (parts.identifier ?? '').trim().toLowerCase(),
+  (parts.title ?? '').trim().toLowerCase(),
+].join('::')
+
 export function generateStatementRunData({
   domain,
   statementPeriodId,
@@ -163,6 +201,7 @@ export function generateStatementRunData({
   carryovers,
   previousStatementCarryovers,
   contractCosts,
+  microAllocations,
   splits,
   contractRepertoireLinks,
   outputCurrencyOverride,
@@ -171,6 +210,7 @@ export function generateStatementRunData({
 }: StatementGenerationInput): {
   diagnostic: StatementGenerationDiagnostic
   drafts: StatementDraft[]
+  microCarryRows: StatementGenerationMicroAllocation[]
 } {
   const diagnostic: StatementGenerationDiagnostic = {
     imports_found: imports.length,
@@ -265,6 +305,21 @@ export function generateStatementRunData({
   const pendingLines = new Map<Key, PendingStatementLine[]>()
   const appliedCostIdsMap = new Map<Key, string[]>()
   const statementCurrencyMap = new Map<Key, { currency: string; exchange_rate: number | null }>()
+  const microCarryRows: StatementGenerationMicroAllocation[] = []
+  const microCarryReleaseKeysByStatement = new Map<Key, Set<string>>()
+  const microCarryResidualRowsByStatement = new Map<Key, StatementGenerationMicroAllocation[]>()
+  const existingPendingMicroByCarryKey = new Map<string, StatementGenerationMicroAllocation[]>()
+  const existingMicroSourceKeys = new Set(
+    microAllocations
+      .filter(entry => entry.source_import_row_id)
+      .map(entry => `${entry.source_import_row_id}::${entry.contract_id}::${entry.payee_id}::${entry.carry_key}`)
+  )
+
+  for (const entry of microAllocations.filter(entry => entry.status !== 'released')) {
+    const list = existingPendingMicroByCarryKey.get(entry.carry_key) ?? []
+    list.push(entry)
+    existingPendingMicroByCarryKey.set(entry.carry_key, list)
+  }
 
   const addLine = (key: Key, line: PendingStatementLine) => {
     const list = pendingLines.get(key) ?? []
@@ -275,6 +330,99 @@ export function generateStatementRunData({
     const list = appliedCostIdsMap.get(key) ?? []
     list.push(costId)
     appliedCostIdsMap.set(key, list)
+  }
+  const addMicroCarryRow = (
+    key: Key,
+    row: ImportRow,
+    rawAmount: number,
+    currency: string,
+    incomeType: string | null,
+  ) => {
+    const [contractId, payeeId] = key.split('::')
+    const carryKey = buildMicroCarryKey({
+      domain,
+      contractId,
+      payeeId,
+      currency,
+      incomeType,
+      identifier: row.identifier_raw ?? null,
+      title: row.title_raw ?? null,
+    })
+    const sourceKey = `${row.id}::${contractId}::${payeeId}::${carryKey}`
+    if (existingMicroSourceKeys.has(sourceKey)) return true
+    const microRow: StatementGenerationMicroAllocation = {
+      source_import_row_id: row.id,
+      statement_period_id: statementPeriodId,
+      contract_id: contractId,
+      payee_id: payeeId,
+      domain,
+      carry_key: carryKey,
+      title: row.title_raw ?? null,
+      identifier: row.identifier_raw ?? null,
+      income_type: incomeType,
+      currency,
+      raw_amount: rawAmount,
+      status: 'pending',
+    }
+    microCarryRows.push(microRow)
+    existingMicroSourceKeys.add(sourceKey)
+
+    const pendingTotal = (existingPendingMicroByCarryKey.get(carryKey) ?? [])
+      .reduce((sum, entry) => sum + Number(entry.raw_amount ?? 0), 0)
+    const combinedTotal = pendingTotal + rawAmount
+    const releaseAmount = Math.trunc(combinedTotal * 100) / 100
+    if (Math.abs(releaseAmount) < MICRO_RELEASE_THRESHOLD) return true
+    const residualAmount = combinedTotal - releaseAmount
+
+    if (!statementCurrencyMap.has(key)) {
+      statementCurrencyMap.set(key, { currency, exchange_rate: null })
+    }
+    if (releaseAmount > 0) {
+      earningsMap.set(key, (earningsMap.get(key) ?? 0) + releaseAmount)
+    } else {
+      deductionsMap.set(key, (deductionsMap.get(key) ?? 0) + Math.abs(releaseAmount))
+    }
+    addLine(key, {
+      source_import_row_id: null,
+      line_category: releaseAmount > 0 ? 'income' : 'deduction',
+      title: row.title_raw ? `${row.title_raw} - rounding carry release` : 'Rounding carry release',
+      identifier: row.identifier_raw ?? null,
+      income_type: incomeType,
+      transaction_date: null,
+      retailer_channel: null,
+      territory: null,
+      quantity: null,
+      gross_amount: 0,
+      net_amount: releaseAmount > 0 ? releaseAmount : 0,
+      deduction_amount: releaseAmount < 0 ? Math.abs(releaseAmount) : 0,
+      split_percent_applied: null,
+      rate_applied: null,
+      pre_split_amount: combinedTotal,
+      notes: `micro_allocation_release:${carryKey}; raw_total=${combinedTotal.toFixed(12)}`,
+    })
+    const releaseKeys = microCarryReleaseKeysByStatement.get(key) ?? new Set<string>()
+    releaseKeys.add(carryKey)
+    microCarryReleaseKeysByStatement.set(key, releaseKeys)
+    existingPendingMicroByCarryKey.set(carryKey, [])
+    if (Math.abs(residualAmount) > 0.000000000001) {
+      const residualRows = microCarryResidualRowsByStatement.get(key) ?? []
+      residualRows.push({
+        source_import_row_id: null,
+        statement_period_id: statementPeriodId,
+        contract_id: contractId,
+        payee_id: payeeId,
+        domain,
+        carry_key: carryKey,
+        title: row.title_raw ?? null,
+        identifier: row.identifier_raw ?? null,
+        income_type: incomeType,
+        currency,
+        raw_amount: residualAmount,
+        status: 'pending',
+      })
+      microCarryResidualRowsByStatement.set(key, residualRows)
+    }
+    return true
   }
   const excludeRow = (
     row: ImportRow,
@@ -331,10 +479,18 @@ export function generateStatementRunData({
 
       const key = `${row.matched_contract_id}::${row.matched_payee_id}`
       const grossAmount = resolveAmount(row, key)
+      const currencyInfo = statementCurrencyMap.get(key)
+      const currency = currencyInfo?.currency ?? importCurrencyMap.get(row.import_id)?.reporting_currency ?? importCurrencyMap.get(row.import_id)?.source_currency ?? domainFallback
       const isDeduction = row.row_type === 'deduction'
       const rawArtistAmount = grossAmount * artistShare
       const roundedArtistAmount = roundMoney(rawArtistAmount)
       const artistAmount = roundedArtistAmount
+
+      if (rawArtistAmount !== 0 && roundedArtistAmount === 0) {
+        const released = addMicroCarryRow(key, row, rawArtistAmount, currency, row.income_type ?? null)
+        if (released) diagnostic.rows_statement_ready++
+        continue
+      }
 
       if (isDeduction) {
         deductionsMap.set(key, (deductionsMap.get(key) ?? 0) + Math.abs(roundedArtistAmount))
@@ -428,9 +584,16 @@ export function generateStatementRunData({
         for (const route of routes) {
           const key = `${route.contract_id}::${route.payee_id}`
           const sourceAmount = resolveAmount(row, key)
+          const currencyInfo = statementCurrencyMap.get(key)
+          const currency = currencyInfo?.currency ?? importCurrencyMap.get(row.import_id)?.reporting_currency ?? importCurrencyMap.get(row.import_id)?.source_currency ?? domainFallback
           const rawAllocation = sourceAmount * route.allocation_multiplier
           const roundedAllocation = roundMoney(rawAllocation)
           const allocation = roundedAllocation
+          if (rawAllocation !== 0 && roundedAllocation === 0) {
+            const released = addMicroCarryRow(key, row, rawAllocation, currency, normalizedIncomeType)
+            wroteLine = wroteLine || released
+            continue
+          }
           if (allocation === 0) continue
 
           if (isDeduction) {
@@ -541,9 +704,16 @@ export function generateStatementRunData({
       for (const route of routes) {
         const key = `${route.contract_id}::${route.payee_id}`
         const sourceAmount = resolveAmount(row, key)
+        const currencyInfo = statementCurrencyMap.get(key)
+        const currency = currencyInfo?.currency ?? importCurrencyMap.get(row.import_id)?.reporting_currency ?? importCurrencyMap.get(row.import_id)?.source_currency ?? domainFallback
         const rawAllocation = sourceAmount * route.allocation_multiplier
         const roundedAllocation = roundMoney(rawAllocation)
         const allocation = roundedAllocation
+        if (rawAllocation !== 0 && roundedAllocation === 0) {
+          const released = addMicroCarryRow(key, row, rawAllocation, currency, normalizedIncomeType)
+          wroteLine = wroteLine || released
+          continue
+        }
         if (allocation === 0) continue
 
         if (isDeduction) {
@@ -700,8 +870,10 @@ export function generateStatementRunData({
       },
       lines: pendingLines.get(key) ?? [],
       appliedCostIds: appliedCostIdsMap.get(key) ?? [],
+      microCarryReleaseKeys: Array.from(microCarryReleaseKeysByStatement.get(key) ?? []),
+      microCarryResidualRows: microCarryResidualRowsByStatement.get(key) ?? [],
     })
   }
 
-  return { diagnostic, drafts }
+  return { diagnostic, drafts, microCarryRows }
 }
