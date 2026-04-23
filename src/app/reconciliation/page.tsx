@@ -397,7 +397,6 @@ export default function ReconciliationPage() {
             .from('micro_allocation_ledger')
             .select('source_import_row_id, statement_period_id, raw_amount, currency, status')
             .eq('statement_period_id', selectedPeriodId)
-            .eq('status', 'pending')
             .order('carry_key')
             .range(from, to)
           if (domainFilter) query = query.eq('domain', domainFilter)
@@ -636,10 +635,10 @@ export default function ReconciliationPage() {
               accent={currentSummary.unmatchedOrError.total !== 0 ? 'amber' : 'default'}
             />
             <ReconStatCard
-              label="Rounding Carry"
+              label="Rounding Carry / Micro Ledger"
               value={roundingAdjustmentValue}
               sub={roundingAdjustmentCount > 0
-                ? `${roundingAdjustmentCount.toLocaleString()} sub-cent allocation${roundingAdjustmentCount !== 1 ? 's' : ''} held until payable`
+                ? `${roundingAdjustmentCount.toLocaleString()} sub-cent allocation${roundingAdjustmentCount !== 1 ? 's' : ''} captured durably`
                 : 'No pending sub-cent allocations'}
               accent={roundingAdjustmentTotal !== 0 ? 'amber' : 'default'}
             />
@@ -663,7 +662,7 @@ export default function ReconciliationPage() {
             </div>
             <div className="card-body space-y-2 text-sm">
               <div className="text-ops-text">
-                Import Total = On Statements + Unmatched / Errors + Excluded + Rounding Carry + Unclassified Difference
+                Import Total = On Statements + Unmatched / Errors + Excluded + Rounding Carry / Micro Ledger + Unclassified Difference
               </div>
               <div className="text-xs text-ops-muted">
                 {formatAggregateAmount(currentSummary.importTotal.total, currentSummary.importTotal.currencies, defaultCurrencyForDomain(domainFilter))}
@@ -678,7 +677,7 @@ export default function ReconciliationPage() {
                 {' + '}
                 {formatAggregateAmount(currentSummary.difference.total, currentSummary.difference.currencies, defaultCurrencyForDomain(domainFilter))}
               </div>
-              {roundingAdjustmentTotal !== 0 && <div className="text-xs text-amber-700">Sub-cent allocations are held in rounding carry until the accumulated balance reaches a payable cent.</div>}
+              {roundingAdjustmentTotal !== 0 && <div className="text-xs text-amber-700">Sub-cent allocations are tracked in the micro ledger; pending balances wait there until they release as a payable cent.</div>}
             </div>
           </div>
 
