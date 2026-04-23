@@ -41,6 +41,17 @@ interface SummaryAmount {
   currencies: string[]
 }
 
+interface UnclassifiedBreakdownRow {
+  id: string
+  importId: string
+  rawRowNumber: number | null
+  title: string
+  amount: number
+  currency: string
+  state: string
+  reason: string
+}
+
 interface RowStatusMeta {
   status: 'Reconciled' | 'Difference' | 'Carry-forward' | 'Manual override' | 'On hold' | 'Needs review'
   tone: 'green' | 'red' | 'amber' | 'slate'
@@ -226,6 +237,7 @@ export default function ReconciliationPage() {
   const [roundingAdjustmentCount, setRoundingAdjustmentCount] = useState(0)
   const [roundingAdjustmentCurrencies, setRoundingAdjustmentCurrencies] = useState<string[]>([])
   const [roundingAdjustmentsByImport, setRoundingAdjustmentsByImport] = useState<Map<string, number>>(new Map())
+  const [roundingRowIds, setRoundingRowIds] = useState<Set<string>>(new Set())
   const [contracts, setContracts] = useState<any[]>([])
   const [payeeLinks, setPayeeLinks] = useState<any[]>([])
   const [splits, setSplits] = useState<any[]>([])
@@ -408,19 +420,31 @@ export default function ReconciliationPage() {
       setCompareRecords((compareData ?? []) as ReconRecord[])
       setImports(currentImports)
       setImportRows(rows)
-      setStatementedRowIds(Array.from(new Set(lineRows.map(row => row.source_import_row_id).filter(Boolean) as string[])))
+      const statementedSourceRowIds = new Set(lineRows.map(row => row.source_import_row_id).filter(Boolean) as string[])
+      setStatementedRowIds(Array.from(statementedSourceRowIds))
       const importIdByRowId = new Map(rows.map(row => [row.id, row.import_id]))
       const roundingByImport = new Map<string, number>()
-      const scopedMicroRows = microRows.filter(row => !!row.source_import_row_id && importIdByRowId.has(row.source_import_row_id))
+      const roundingSourceRowIds = new Set<string>()
+      const scopedMicroRows = microRows.filter(row =>
+        !!row.source_import_row_id &&
+        importIdByRowId.has(row.source_import_row_id) &&
+        !statementedSourceRowIds.has(row.source_import_row_id)
+      )
       for (const row of scopedMicroRows) {
         const importId = row.source_import_row_id ? importIdByRowId.get(row.source_import_row_id) : null
         if (!importId) continue
-        roundingByImport.set(importId, (roundingByImport.get(importId) ?? 0) + Number(row.raw_amount ?? 0))
+        roundingSourceRowIds.add(row.source_import_row_id!)
       }
-      setRoundingAdjustmentTotal(scopedMicroRows.reduce((sum, row) => sum + Number(row.raw_amount ?? 0), 0))
-      setRoundingAdjustmentCount(scopedMicroRows.length)
+      for (const row of rows) {
+        if (!roundingSourceRowIds.has(row.id)) continue
+        const importSummary = currentImports.find(item => item.id === row.import_id)
+        roundingByImport.set(row.import_id, (roundingByImport.get(row.import_id) ?? 0) + resolveImportRowGross(row, importSummary))
+      }
+      setRoundingAdjustmentTotal(rows.reduce((sum, row) => roundingSourceRowIds.has(row.id) ? sum + resolveImportRowGross(row, currentImports.find(item => item.id === row.import_id)) : sum, 0))
+      setRoundingAdjustmentCount(roundingSourceRowIds.size)
       setRoundingAdjustmentCurrencies(scopedMicroRows.map(row => row.currency))
       setRoundingAdjustmentsByImport(roundingByImport)
+      setRoundingRowIds(roundingSourceRowIds)
       setContracts(contracts)
       setPayeeLinks(payeeLinks)
       setSplits(splits)
@@ -438,6 +462,7 @@ export default function ReconciliationPage() {
       setRoundingAdjustmentCount(0)
       setRoundingAdjustmentCurrencies([])
       setRoundingAdjustmentsByImport(new Map())
+      setRoundingRowIds(new Set())
       setContracts([])
       setPayeeLinks([])
       setSplits([])
@@ -453,11 +478,12 @@ export default function ReconciliationPage() {
   const compareMap = new Map(compareRecords.map(record => [`${record.contract_id}:${record.payee_id}`, record]))
   const statementedRowIdSet = new Set(statementedRowIds)
 
-  const [currentSummary, importCoverage] = (() => {
+  const [currentSummary, importCoverage, unclassifiedRows] = (() => {
     return buildReconciliationData({
       imports,
       importRows,
       statementedRowIdSet,
+      roundingRowIds,
       contracts,
       payeeLinks,
       splits,
@@ -756,6 +782,61 @@ export default function ReconciliationPage() {
             )}
           </div>
 
+          {unclassifiedRows.length > 0 && (
+            <div className="card border border-amber-300">
+              <div className="card-header bg-amber-50/70">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle size={14} className="text-amber-500" />
+                  <span className="text-sm font-semibold text-amber-700">
+                    Unclassified Difference Breakdown ({unclassifiedRows.length} row{unclassifiedRows.length !== 1 ? 's' : ''})
+                  </span>
+                </div>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="ops-table">
+                  <thead>
+                    <tr>
+                      <th>Import Row</th>
+                      <th>Title</th>
+                      <th>Amount</th>
+                      <th>Current State</th>
+                      <th>Why It Is Unclassified</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {unclassifiedRows.map(row => (
+                      <tr key={row.id}>
+                        <td>
+                          <div className="font-mono text-xs">{row.id.slice(0, 8)}</div>
+                          <div className="text-[10px] text-ops-muted">
+                            {row.rawRowNumber != null ? `source row ${row.rawRowNumber}` : row.importId.slice(0, 8)}
+                          </div>
+                        </td>
+                        <td className="text-xs font-medium">{row.title}</td>
+                        <td><Num val={row.amount} currency={row.currency} bold /></td>
+                        <td className="text-xs">{row.state}</td>
+                        <td className="text-xs text-ops-muted">{row.reason}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr style={{ borderTop: '2px solid var(--ops-border)' }}>
+                      <td colSpan={2} className="text-xs font-semibold text-right pr-3 py-2">Total unclassified</td>
+                      <td className="py-2">
+                        <Num
+                          val={unclassifiedRows.reduce((sum, row) => sum + row.amount, 0)}
+                          currency={unclassifiedRows[0]?.currency ?? defaultCurrencyForDomain(domainFilter)}
+                          bold
+                        />
+                      </td>
+                      <td colSpan={2}></td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          )}
+
           {chainIssues.length > 0 && (
             <div className="card border border-red-800/30">
               <div className="card-header bg-red-50/70">
@@ -962,6 +1043,7 @@ function buildReconciliationData({
   imports,
   importRows,
   statementedRowIdSet,
+  roundingRowIds,
   contracts,
   payeeLinks,
   splits,
@@ -972,6 +1054,7 @@ function buildReconciliationData({
   imports: ReconImport[]
   importRows: ReconImportRow[]
   statementedRowIdSet: Set<string>
+  roundingRowIds: Set<string>
   contracts: any[]
   payeeLinks: any[]
   splits: any[]
@@ -992,6 +1075,7 @@ function buildReconciliationData({
   }
 
   const coverageMap = new Map<string, CoverageRow>()
+  const unclassifiedRows: UnclassifiedBreakdownRow[] = []
 
   const pushAmount = (bucket: SummaryAmount, amount: number, currency: string) => {
     bucket.total += amount
@@ -1020,20 +1104,45 @@ function buildReconciliationData({
     coverage.importTotal += amount
     pushAmount(totals.importTotal, amount, currency)
 
+    let classified = false
+    let state = 'Unclassified'
+    let reason = 'Row did not match any visible reconciliation bucket.'
+
     if (row.excluded_flag) {
       coverage.excluded += amount
       pushAmount(totals.excluded, amount, currency)
+      classified = true
     } else if (isLiveUnresolvedRow(row, contracts, payeeLinks, splits, links)) {
       coverage.unmatchedOrError += amount
       pushAmount(totals.unmatchedOrError, amount, currency)
+      classified = true
+    } else if (roundingRowIds.has(row.id)) {
+      coverage.roundingAdjustment += amount
+      classified = true
     } else if (isPublishingStatementEligibleRow(row, linkedRepertoireIds)) {
       coverage.grossInScope += amount
       pushAmount(totals.grossInScope, amount, currency)
+      state = 'In scope but not written'
+      reason = 'Row is matched and has a live setup path, but it is not on statement lines, Sales Errors, Excluded, or Rounding Carry.'
     }
 
     if (statementedRowIdSet.has(row.id)) {
       coverage.onStatements += amount
       pushAmount(totals.onStatements, amount, currency)
+      classified = true
+    }
+
+    if (!classified && amount !== 0) {
+      unclassifiedRows.push({
+        id: row.id,
+        importId: row.import_id,
+        rawRowNumber: row.raw_row_number ?? null,
+        title: row.title_raw ?? row.identifier_raw ?? '(untitled)',
+        amount,
+        currency,
+        state,
+        reason,
+      })
     }
 
     coverageMap.set(row.import_id, coverage)
@@ -1042,8 +1151,8 @@ function buildReconciliationData({
   const coverageRows = Array.from(coverageMap.values())
     .map(row => ({
       ...row,
-      roundingAdjustment: roundingAdjustmentsByImport.get(row.importId) ?? 0,
-      difference: row.importTotal - row.onStatements - row.unmatchedOrError - row.excluded - (roundingAdjustmentsByImport.get(row.importId) ?? 0),
+      roundingAdjustment: row.roundingAdjustment || roundingAdjustmentsByImport.get(row.importId) || 0,
+      difference: row.importTotal - row.onStatements - row.unmatchedOrError - row.excluded - (row.roundingAdjustment || roundingAdjustmentsByImport.get(row.importId) || 0),
     }))
     .sort((a, b) => a.importName.localeCompare(b.importName))
 
@@ -1051,7 +1160,7 @@ function buildReconciliationData({
     pushAmount(totals.difference, row.difference, row.currencyLabel)
   }
 
-  return [totals, coverageRows] as const
+  return [totals, coverageRows, unclassifiedRows] as const
 }
 
 function ReconStatCard({
