@@ -41,6 +41,12 @@ interface SummaryAmount {
   currencies: string[]
 }
 
+interface StatementAmountSummary {
+  statemented: SummaryAmount
+  manualOverride: SummaryAmount
+  manualOverrideCount: number
+}
+
 interface UnclassifiedBreakdownRow {
   id: string
   importId: string
@@ -220,6 +226,32 @@ function deriveRowStatus(record: ReconRecord, prior: ReconRecord | undefined): R
     return { status: 'Needs review', tone: 'slate', flags, hasMismatch: false }
   }
   return { status: 'Reconciled', tone: 'green', flags, hasMismatch: false }
+}
+
+function buildStatementAmountSummary(records: ReconRecord[], fallbackCurrency: string): StatementAmountSummary {
+  const statemented: SummaryAmount = { total: 0, currencies: [] }
+  const manualOverride: SummaryAmount = { total: 0, currencies: [] }
+  let manualOverrideCount = 0
+
+  for (const record of records) {
+    const currency = record.statement_currency ?? record.payee?.currency ?? fallbackCurrency
+    const amount = Number(record.payable_amount ?? 0)
+    statemented.total += amount
+    if (amount !== 0) statemented.currencies.push(currency)
+
+    if (record.manual_override_flag) {
+      manualOverrideCount++
+      manualOverride.total += amount
+      if (amount !== 0) manualOverride.currencies.push(currency)
+    }
+  }
+
+  return { statemented, manualOverride, manualOverrideCount }
+}
+
+function addToSummary(bucket: SummaryAmount, amount: number, currency: string) {
+  bucket.total += amount
+  if (amount !== 0 && currency) bucket.currencies.push(currency)
 }
 
 export default function ReconciliationPage() {
@@ -427,20 +459,15 @@ export default function ReconciliationPage() {
       const roundingSourceRowIds = new Set<string>()
       const scopedMicroRows = microRows.filter(row =>
         !!row.source_import_row_id &&
-        importIdByRowId.has(row.source_import_row_id) &&
-        !statementedSourceRowIds.has(row.source_import_row_id)
+        importIdByRowId.has(row.source_import_row_id)
       )
       for (const row of scopedMicroRows) {
         const importId = row.source_import_row_id ? importIdByRowId.get(row.source_import_row_id) : null
         if (!importId) continue
         roundingSourceRowIds.add(row.source_import_row_id!)
+        roundingByImport.set(importId, (roundingByImport.get(importId) ?? 0) + Number(row.raw_amount ?? 0))
       }
-      for (const row of rows) {
-        if (!roundingSourceRowIds.has(row.id)) continue
-        const importSummary = currentImports.find(item => item.id === row.import_id)
-        roundingByImport.set(row.import_id, (roundingByImport.get(row.import_id) ?? 0) + resolveImportRowGross(row, importSummary))
-      }
-      setRoundingAdjustmentTotal(rows.reduce((sum, row) => roundingSourceRowIds.has(row.id) ? sum + resolveImportRowGross(row, currentImports.find(item => item.id === row.import_id)) : sum, 0))
+      setRoundingAdjustmentTotal(scopedMicroRows.reduce((sum, row) => sum + Number(row.raw_amount ?? 0), 0))
       setRoundingAdjustmentCount(roundingSourceRowIds.size)
       setRoundingAdjustmentCurrencies(scopedMicroRows.map(row => row.currency))
       setRoundingAdjustmentsByImport(roundingByImport)
@@ -479,11 +506,13 @@ export default function ReconciliationPage() {
   const statementedRowIdSet = new Set(statementedRowIds)
 
   const [currentSummary, importCoverage, unclassifiedRows] = (() => {
+    const statementAmounts = buildStatementAmountSummary(records, defaultCurrencyForDomain(domainFilter))
     return buildReconciliationData({
       imports,
       importRows,
       statementedRowIdSet,
       roundingRowIds,
+      statementAmounts,
       contracts,
       payeeLinks,
       splits,
@@ -558,6 +587,11 @@ export default function ReconciliationPage() {
   const roundingAdjustmentValue = formatAggregateAmount(
     roundingAdjustmentTotal,
     roundingAdjustmentCurrencies,
+    defaultCurrencyForDomain(domainFilter)
+  )
+  const manualOverrideValue = formatAggregateAmount(
+    currentSummary.manualOverride.total,
+    currentSummary.manualOverride.currencies,
     defaultCurrencyForDomain(domainFilter)
   )
 
@@ -651,8 +685,16 @@ export default function ReconciliationPage() {
             <ReconStatCard
               label="On Statements"
               value={formatAggregateAmount(currentSummary.onStatements.total, currentSummary.onStatements.currencies, defaultCurrencyForDomain(domainFilter))}
-              sub={`${statementedRowIds.length.toLocaleString()} import row(s) written to statements`}
+              sub="actual payable on statement records"
               accent="green"
+            />
+            <ReconStatCard
+              label="Manual Override"
+              value={manualOverrideValue}
+              sub={currentSummary.manualOverrideCount > 0
+                ? `${currentSummary.manualOverrideCount.toLocaleString()} statement${currentSummary.manualOverrideCount !== 1 ? 's' : ''} with manual values`
+                : 'No manual override payable'}
+              accent={currentSummary.manualOverride.total !== 0 ? 'amber' : 'default'}
             />
             <ReconStatCard
               label="Unmatched / Errors"
@@ -1044,6 +1086,7 @@ function buildReconciliationData({
   importRows,
   statementedRowIdSet,
   roundingRowIds,
+  statementAmounts,
   contracts,
   payeeLinks,
   splits,
@@ -1055,6 +1098,7 @@ function buildReconciliationData({
   importRows: ReconImportRow[]
   statementedRowIdSet: Set<string>
   roundingRowIds: Set<string>
+  statementAmounts: StatementAmountSummary
   contracts: any[]
   payeeLinks: any[]
   splits: any[]
@@ -1068,7 +1112,9 @@ function buildReconciliationData({
   const totals = {
     importTotal: { total: 0, currencies: [] as string[] },
     grossInScope: { total: 0, currencies: [] as string[] },
-    onStatements: { total: 0, currencies: [] as string[] },
+    onStatements: statementAmounts.statemented,
+    manualOverride: statementAmounts.manualOverride,
+    manualOverrideCount: statementAmounts.manualOverrideCount,
     unmatchedOrError: { total: 0, currencies: [] as string[] },
     excluded: { total: 0, currencies: [] as string[] },
     difference: { total: 0, currencies: [] as string[] },
@@ -1078,8 +1124,7 @@ function buildReconciliationData({
   const unclassifiedRows: UnclassifiedBreakdownRow[] = []
 
   const pushAmount = (bucket: SummaryAmount, amount: number, currency: string) => {
-    bucket.total += amount
-    if (amount !== 0 && currency) bucket.currencies.push(currency)
+    addToSummary(bucket, amount, currency)
   }
 
   for (const row of importRows) {
@@ -1128,7 +1173,6 @@ function buildReconciliationData({
 
     if (statementedRowIdSet.has(row.id)) {
       coverage.onStatements += amount
-      pushAmount(totals.onStatements, amount, currency)
       classified = true
     }
 
@@ -1156,9 +1200,12 @@ function buildReconciliationData({
     }))
     .sort((a, b) => a.importName.localeCompare(b.importName))
 
-  for (const row of coverageRows) {
-    pushAmount(totals.difference, row.difference, row.currencyLabel)
-  }
+  const roundingTotal = Array.from(roundingAdjustmentsByImport.values()).reduce((sum, value) => sum + value, 0)
+  addToSummary(
+    totals.difference,
+    totals.importTotal.total - totals.onStatements.total - totals.unmatchedOrError.total - totals.excluded.total - roundingTotal,
+    totals.importTotal.currencies[0] ?? fallbackCurrency
+  )
 
   return [totals, coverageRows, unclassifiedRows] as const
 }
