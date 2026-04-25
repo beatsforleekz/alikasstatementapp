@@ -308,11 +308,12 @@ export default function ReconciliationPage() {
         .order('half', { ascending: false })
       if (periodsError) throw periodsError
       const sorted = sortByLabel(data ?? [], period => period.label)
+      const currentPeriod = (data ?? []).find((period: any) => period.is_current) ?? sorted[0]
       setPeriods(sorted)
-      if (sorted.length > 0) {
-        setSelectedPeriodId(current => current || sorted[0].id)
+      if (currentPeriod) {
+        setSelectedPeriodId(current => current || currentPeriod.id)
         if (sorted.length > 1) {
-          setComparePeriodId(current => current || sorted.find(period => period.id !== sorted[0].id)?.id || '')
+          setComparePeriodId(current => current || sorted.find(period => period.id !== currentPeriod.id)?.id || '')
         }
       }
     } catch (e: any) {

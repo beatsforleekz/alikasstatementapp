@@ -1503,6 +1503,12 @@ export default function StatementRunPage() {
 
         let recordId: string
         let payload: Record<string, any> = draft.payload
+        payload = {
+          ...payload,
+          approval_status: 'pending',
+          approved_at: null,
+          approved_by: null,
+        }
         if (existing) {
           if (existing.manual_override_flag) {
             const contract = (fcD as any[]).find(contractRow => contractRow.id === draft.contract_id) ?? null
@@ -1534,11 +1540,17 @@ export default function StatementRunPage() {
               diag.user_fixable.push('manual balance overrides were preserved while current-period earnings and lines were refreshed')
             }
           }
+          payload = {
+            ...payload,
+            approval_status: 'pending',
+            approved_at: null,
+            approved_by: null,
+          }
           await supabase.from('statement_records').update(payload).eq('id', existing.id)
           recordId = existing.id; diag.statements_updated++
         } else {
           const { data: ins } = await supabase.from('statement_records')
-            .insert({ ...payload, approval_status: 'pending' }).select('id').single()
+            .insert(payload).select('id').single()
           recordId = ins!.id; diag.statements_created++
         }
         touchedRecordIds.add(recordId)
