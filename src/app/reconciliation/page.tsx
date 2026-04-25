@@ -47,11 +47,29 @@ interface UnclassifiedBreakdownRow {
   importId: string
   rawRowNumber: number | null
   title: string
+  identifier: string
+  incomeType: string
   amount: number
   currency: string
   state: string
   reason: string
 }
+
+interface ReconDrilldownRow {
+  id: string
+  title: string
+  identifier: string
+  rowNumber: number | null
+  incomeType: string
+  amount: number
+  currency: string
+  payee: string
+  contract: string
+  status: string
+  reason: string
+}
+
+type ReconDrilldownKey = 'coverage' | 'rounding' | 'errors' | 'excluded' | 'unclassified'
 
 interface RowStatusMeta {
   status: 'Reconciled' | 'Difference' | 'Carry-forward' | 'Manual override' | 'On hold' | 'Needs review'
@@ -251,7 +269,10 @@ export default function ReconciliationPage() {
   const [roundingAdjustmentCurrencies, setRoundingAdjustmentCurrencies] = useState<string[]>([])
   const [roundingAdjustmentsByImport, setRoundingAdjustmentsByImport] = useState<Map<string, number>>(new Map())
   const [roundingRowIds, setRoundingRowIds] = useState<Set<string>>(new Set())
+  const [statementLineRows, setStatementLineRows] = useState<any[]>([])
+  const [microLedgerRows, setMicroLedgerRows] = useState<any[]>([])
   const [contracts, setContracts] = useState<any[]>([])
+  const [payees, setPayees] = useState<any[]>([])
   const [payeeLinks, setPayeeLinks] = useState<any[]>([])
   const [splits, setSplits] = useState<any[]>([])
   const [contractRepertoireLinks, setContractRepertoireLinks] = useState<ContractRepertoireAllocationLink[]>([])
@@ -262,6 +283,7 @@ export default function ReconciliationPage() {
   const [recoupFilter, setRecoupFilter] = useState<RecoupFilter>('')
   const [sortOption, setSortOption] = useState<SortOption>('highest_payable')
   const [error, setError] = useState<string | null>(null)
+  const [openDrilldown, setOpenDrilldown] = useState<ReconDrilldownKey | null>(null)
 
   useEffect(() => {
     void loadPeriods()
@@ -373,7 +395,7 @@ export default function ReconciliationPage() {
       const importIds = currentImports.map(item => item.id)
       const statementIds = currentRecords.map(record => record.id)
 
-      const [rows, links, splits, contracts, payeeLinks, lineRows, microRows] = await Promise.all([
+      const [rows, links, splits, contracts, payees, payeeLinks, lineRows, microRows] = await Promise.all([
         importIds.length > 0 ? fetchAllImportRows(importIds) : Promise.resolve([] as ReconImportRow[]),
         fetchAllPaged<{ contract_id: string; repertoire_id: string | null; royalty_rate: number | null }>((from, to) =>
           supabase
@@ -395,8 +417,16 @@ export default function ReconciliationPage() {
         fetchAllPaged<any>((from, to) =>
           supabase
             .from('contracts')
-            .select('id, contract_type, status')
+            .select('id, contract_name, contract_code, contract_type, status')
             .order('contract_name')
+            .range(from, to)
+        ),
+        fetchAllPaged<any>((from, to) =>
+          supabase
+            .from('payees')
+            .select('id, payee_name')
+            .eq('active_status', true)
+            .order('payee_name')
             .range(from, to)
         ),
         fetchAllPaged<any>((from, to) =>
@@ -418,10 +448,10 @@ export default function ReconciliationPage() {
                 .range(from, to)
             )
           : Promise.resolve([] as { source_import_row_id: string | null; notes: string | null; statement_record_id: string; net_amount: number | null; deduction_amount: number | null }[]),
-        fetchAllPaged<{ source_import_row_id: string | null; statement_period_id: string; raw_amount: number; currency: string; status: string }>((from, to) => {
+        fetchAllPaged<{ id: string; source_import_row_id: string | null; statement_period_id: string; contract_id: string | null; payee_id: string | null; carry_key: string | null; title: string | null; identifier: string | null; income_type: string | null; raw_amount: number; currency: string; status: string }>((from, to) => {
           let query = supabase
             .from('micro_allocation_ledger')
-            .select('source_import_row_id, statement_period_id, raw_amount, currency, status')
+            .select('id, source_import_row_id, statement_period_id, contract_id, payee_id, carry_key, title, identifier, income_type, raw_amount, currency, status')
             .eq('statement_period_id', selectedPeriodId)
             .order('carry_key')
             .range(from, to)
@@ -434,6 +464,7 @@ export default function ReconciliationPage() {
       setCompareRecords((compareData ?? []) as ReconRecord[])
       setImports(currentImports)
       setImportRows(rows)
+      setStatementLineRows(lineRows)
       const statementedSourceRowIds = new Set(lineRows.map(row => row.source_import_row_id).filter(Boolean) as string[])
       setStatementedRowIds(Array.from(statementedSourceRowIds))
       const importIdByRowId = new Map(rows.map(row => [row.id, row.import_id]))
@@ -459,7 +490,9 @@ export default function ReconciliationPage() {
       setRoundingAdjustmentCurrencies(scopedMicroRows.map(row => row.currency))
       setRoundingAdjustmentsByImport(roundingByImport)
       setRoundingRowIds(roundingSourceRowIds)
+      setMicroLedgerRows(scopedMicroRows)
       setContracts(contracts)
+      setPayees(payees)
       setPayeeLinks(payeeLinks)
       setSplits(splits)
       setContractRepertoireLinks(
@@ -472,12 +505,15 @@ export default function ReconciliationPage() {
       setImports([])
       setImportRows([])
       setStatementedRowIds([])
+      setStatementLineRows([])
       setRoundingAdjustmentTotal(0)
       setRoundingAdjustmentCount(0)
       setRoundingAdjustmentCurrencies([])
       setRoundingAdjustmentsByImport(new Map())
       setRoundingRowIds(new Set())
+      setMicroLedgerRows([])
       setContracts([])
+      setPayees([])
       setPayeeLinks([])
       setSplits([])
       setContractRepertoireLinks([])
@@ -491,6 +527,21 @@ export default function ReconciliationPage() {
   const comparePeriod = periods.find(period => period.id === comparePeriodId)
   const compareMap = new Map(compareRecords.map(record => [`${record.contract_id}:${record.payee_id}`, record]))
   const statementedRowIdSet = new Set(statementedRowIds)
+  const contractNameById = new Map(contracts.map(contract => [contract.id, contract.contract_name ?? contract.contract_code ?? contract.id]))
+  const payeeNameById = new Map(payees.map(payee => [payee.id, payee.payee_name ?? payee.id]))
+  const statementRecordById = new Map(records.map(record => [record.id, record]))
+  const importRowById = new Map(importRows.map(row => [row.id, row]))
+  const lineContextByImportRowId = new Map<string, { payee: string; contract: string; status: string }>()
+  for (const line of statementLineRows) {
+    if (!line.source_import_row_id || lineContextByImportRowId.has(line.source_import_row_id)) continue
+    const record = statementRecordById.get(line.statement_record_id)
+    lineContextByImportRowId.set(line.source_import_row_id, {
+      payee: record?.payee?.payee_name ?? '—',
+      contract: record?.contract?.contract_name ?? record?.contract?.contract_code ?? '—',
+      status: record?.approval_status ?? 'On statement',
+    })
+  }
+  const linkedRepertoireIds = buildPublishingContractPathSet(contractRepertoireLinks, splits)
 
   const [currentSummary, importCoverage, unclassifiedRows] = (() => {
     return buildReconciliationData({
@@ -506,6 +557,75 @@ export default function ReconciliationPage() {
       fallbackCurrency: defaultCurrencyForDomain(domainFilter),
     })
   })()
+
+  const toImportDrilldownRow = (row: ReconImportRow, status: string, reason: string): ReconDrilldownRow => {
+    const importSummary = imports.find(item => item.id === row.import_id)
+    const lineContext = lineContextByImportRowId.get(row.id)
+    return {
+      id: row.id,
+      title: row.title_raw ?? row.identifier_raw ?? '(untitled)',
+      identifier: row.tempo_id ?? row.identifier_raw ?? '—',
+      rowNumber: row.raw_row_number ?? null,
+      incomeType: row.income_type ?? '—',
+      amount: resolveImportRowGross(row, importSummary),
+      currency: importSummary?.reporting_currency ?? importSummary?.source_currency ?? defaultCurrencyForDomain(domainFilter),
+      payee: lineContext?.payee ?? row.payee_name_raw ?? '—',
+      contract: lineContext?.contract ?? row.contract_name_raw ?? '—',
+      status,
+      reason,
+    }
+  }
+
+  const statementCoverageRows = importRows
+    .filter(row =>
+      statementedRowIdSet.has(row.id) &&
+      isPublishingStatementEligibleRow(row, linkedRepertoireIds) &&
+      !row.excluded_flag &&
+      !isLiveUnresolvedRow(row, contracts, payeeLinks, splits, contractRepertoireLinks) &&
+      !roundingRowIds.has(row.id)
+    )
+    .map(row => toImportDrilldownRow(row, lineContextByImportRowId.get(row.id)?.status ?? 'On statement', 'Covered by generated statement lines.'))
+
+  const unmatchedErrorRows = importRows
+    .filter(row => !row.excluded_flag && isLiveUnresolvedRow(row, contracts, payeeLinks, splits, contractRepertoireLinks))
+    .map(row => toImportDrilldownRow(row, 'Unmatched / Error', row.error_reason ?? row.warning_reason ?? 'Live unresolved row with no valid statement path.'))
+
+  const excludedRows = importRows
+    .filter(row => !!row.excluded_flag)
+    .map(row => toImportDrilldownRow(row, 'Excluded', row.warning_reason ?? row.error_reason ?? 'Explicitly excluded from statement output.'))
+
+  const roundingCarryRows = microLedgerRows.map(row => {
+    const sourceRow = row.source_import_row_id ? importRowById.get(row.source_import_row_id) : null
+    return {
+      id: row.id,
+      title: row.title ?? sourceRow?.title_raw ?? sourceRow?.identifier_raw ?? '(untitled)',
+      identifier: row.identifier ?? sourceRow?.tempo_id ?? sourceRow?.identifier_raw ?? '—',
+      rowNumber: sourceRow?.raw_row_number ?? null,
+      incomeType: row.income_type ?? sourceRow?.income_type ?? '—',
+      amount: Number(row.raw_amount ?? 0),
+      currency: row.currency ?? defaultCurrencyForDomain(domainFilter),
+      payee: row.payee_id ? (payeeNameById.get(row.payee_id) ?? row.payee_id) : '—',
+      contract: row.contract_id ? (contractNameById.get(row.contract_id) ?? row.contract_id) : '—',
+      status: row.status ?? 'pending',
+      reason: 'Held in micro allocation ledger until the pending balance reaches a payable cent.',
+    } satisfies ReconDrilldownRow
+  })
+
+  const unclassifiedDrilldownRows = unclassifiedRows.map(row => toImportDrilldownRow(importRowById.get(row.id) ?? ({
+    id: row.id,
+    import_id: row.importId,
+    raw_row_number: row.rawRowNumber,
+    title_raw: row.title,
+    tempo_id: row.identifier,
+    identifier_raw: row.identifier,
+    income_type: row.incomeType,
+    payee_name_raw: null,
+    contract_name_raw: null,
+    amount: row.amount,
+    amount_converted: row.amount,
+    net_amount: row.amount,
+    row_type: null,
+  } as ReconImportRow), row.state, row.reason))
 
   const chainIssues = records
     .map(record => ({ record, check: validateBalanceChain(record) }))
@@ -594,6 +714,50 @@ export default function ReconciliationPage() {
     roundingAdjustmentCurrencies,
     defaultCurrencyForDomain(domainFilter)
   )
+
+  const drilldownConfig: Record<ReconDrilldownKey, {
+    title: string
+    rows: ReconDrilldownRow[]
+    totalLabel: string
+    totalValue: string
+    extra?: React.ReactNode
+  }> = {
+    coverage: {
+      title: 'Statement Coverage Rows',
+      rows: statementCoverageRows,
+      totalLabel: 'Covered total',
+      totalValue: formatAggregateAmount(currentSummary.onStatements.total, currentSummary.onStatements.currencies, defaultCurrencyForDomain(domainFilter)),
+    },
+    rounding: {
+      title: 'Rounding Carry / Micro Ledger',
+      rows: roundingCarryRows,
+      totalLabel: 'Rounding carry total',
+      totalValue: roundingAdjustmentValue,
+    },
+    errors: {
+      title: 'Unmatched / Errors',
+      rows: unmatchedErrorRows,
+      totalLabel: 'Unmatched / error total',
+      totalValue: formatAggregateAmount(currentSummary.unmatchedOrError.total, currentSummary.unmatchedOrError.currencies, defaultCurrencyForDomain(domainFilter)),
+      extra: (
+        <Link href={`/sales-errors${domainFilter ? `?domain=${domainFilter}` : ''}`} className="btn-ghost btn-sm">
+          Open Sales Errors
+        </Link>
+      ),
+    },
+    excluded: {
+      title: 'Excluded Rows',
+      rows: excludedRows,
+      totalLabel: 'Excluded total',
+      totalValue: formatAggregateAmount(currentSummary.excluded.total, currentSummary.excluded.currencies, defaultCurrencyForDomain(domainFilter)),
+    },
+    unclassified: {
+      title: 'Unclassified Difference Rows',
+      rows: unclassifiedDrilldownRows,
+      totalLabel: 'Unclassified total',
+      totalValue: formatUnclassifiedAmount(currentSummary.difference.total, currentSummary.difference.currencies, defaultCurrencyForDomain(domainFilter)),
+    },
+  }
 
   const exportStatementTotalsCsv = () => {
     const rows = [
@@ -735,6 +899,7 @@ export default function ReconciliationPage() {
               value={formatAggregateAmount(currentSummary.onStatements.total, currentSummary.onStatements.currencies, defaultCurrencyForDomain(domainFilter))}
               sub={`${statementedRowIds.length.toLocaleString()} import row(s) covered by generated statement lines`}
               accent="green"
+              onClick={() => setOpenDrilldown('coverage')}
             />
             <ReconStatCard
               label="Currently Payable"
@@ -753,6 +918,7 @@ export default function ReconciliationPage() {
               value={formatAggregateAmount(currentSummary.unmatchedOrError.total, currentSummary.unmatchedOrError.currencies, defaultCurrencyForDomain(domainFilter))}
               sub="Live unresolved rows"
               accent={currentSummary.unmatchedOrError.total !== 0 ? 'amber' : 'default'}
+              onClick={() => setOpenDrilldown('errors')}
             />
             <ReconStatCard
               label="Rounding Carry / Micro Ledger"
@@ -761,20 +927,34 @@ export default function ReconciliationPage() {
                 ? `${roundingAdjustmentCount.toLocaleString()} sub-cent allocation${roundingAdjustmentCount !== 1 ? 's' : ''} captured durably`
                 : 'No pending sub-cent allocations'}
               accent={roundingAdjustmentTotal !== 0 ? 'amber' : 'default'}
+              onClick={() => setOpenDrilldown('rounding')}
             />
             <ReconStatCard
               label="Excluded"
               value={formatAggregateAmount(currentSummary.excluded.total, currentSummary.excluded.currencies, defaultCurrencyForDomain(domainFilter))}
               sub="Explicitly excluded rows"
               accent={currentSummary.excluded.total !== 0 ? 'amber' : 'default'}
+              onClick={() => setOpenDrilldown('excluded')}
             />
             <ReconStatCard
               label="Unclassified Difference"
               value={formatUnclassifiedAmount(currentSummary.difference.total, currentSummary.difference.currencies, defaultCurrencyForDomain(domainFilter))}
               sub="Anything not yet explained by a visible bucket"
               accent={currentSummary.difference.total !== 0 ? 'red' : 'default'}
+              onClick={currentSummary.difference.total !== 0 ? () => setOpenDrilldown('unclassified') : undefined}
             />
           </div>
+
+          {openDrilldown && (
+            <ReconDrilldownModal
+              title={drilldownConfig[openDrilldown].title}
+              rows={drilldownConfig[openDrilldown].rows}
+              totalLabel={drilldownConfig[openDrilldown].totalLabel}
+              totalValue={drilldownConfig[openDrilldown].totalValue}
+              onClose={() => setOpenDrilldown(null)}
+              extraAction={drilldownConfig[openDrilldown].extra}
+            />
+          )}
 
           <div className="card border border-blue-200 bg-blue-50/50">
             <div className="card-body space-y-1 text-xs text-ops-muted">
@@ -1246,6 +1426,8 @@ function buildReconciliationData({
         importId: row.import_id,
         rawRowNumber: row.raw_row_number ?? null,
         title: row.title_raw ?? row.identifier_raw ?? '(untitled)',
+        identifier: row.tempo_id ?? row.identifier_raw ?? '—',
+        incomeType: row.income_type ?? '—',
         amount,
         currency,
         state,
@@ -1276,11 +1458,13 @@ function ReconStatCard({
   value,
   sub,
   accent = 'default',
+  onClick,
 }: {
   label: string
   value: string
   sub?: string
   accent?: 'default' | 'green' | 'amber' | 'red' | 'cyan'
+  onClick?: (() => void) | undefined
 }) {
   const tone = accent === 'green'
     ? 'border-green-200 bg-green-50/70'
@@ -1293,7 +1477,9 @@ function ReconStatCard({
           : 'border-ops-border bg-white'
 
   return (
-    <div
+    <button
+      type="button"
+      onClick={onClick}
       className={`card border ${tone}`}
       style={{
         flex: '0 0 220px',
@@ -1302,7 +1488,10 @@ function ReconStatCard({
         maxWidth: 220,
         minHeight: 130,
         overflow: 'hidden',
+        textAlign: 'left',
+        cursor: onClick ? 'pointer' : 'default',
       }}
+      disabled={!onClick}
     >
       <div className="card-body space-y-1.5">
         <div className="text-[11px] uppercase tracking-wide text-ops-muted">{label}</div>
@@ -1310,6 +1499,99 @@ function ReconStatCard({
           {value}
         </div>
         {sub && <div className="text-[11px] leading-relaxed text-ops-muted">{sub}</div>}
+      </div>
+    </button>
+  )
+}
+
+function ReconDrilldownModal({
+  title,
+  rows,
+  totalLabel,
+  totalValue,
+  onClose,
+  extraAction,
+}: {
+  title: string
+  rows: ReconDrilldownRow[]
+  totalLabel: string
+  totalValue: string
+  onClose: () => void
+  extraAction?: React.ReactNode
+}) {
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(15, 23, 42, 0.42)',
+        zIndex: 60,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 24,
+      }}
+      onClick={onClose}
+    >
+      <div
+        className="card"
+        style={{ width: 'min(1280px, 100%)', maxHeight: '85vh', overflow: 'hidden' }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="card-header">
+          <div className="flex items-center justify-between gap-3 flex-wrap w-full">
+            <div>
+              <div className="text-sm font-semibold">{title}</div>
+              <div className="text-xs text-ops-muted">{rows.length.toLocaleString()} row(s)</div>
+            </div>
+            <div className="flex items-center gap-2">
+              {extraAction}
+              <button className="btn-ghost btn-sm" onClick={onClose}>Close</button>
+            </div>
+          </div>
+        </div>
+        <div className="overflow-x-auto" style={{ maxHeight: 'calc(85vh - 120px)' }}>
+          <table className="ops-table">
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>Identifier / Tempo ID</th>
+                <th>Row</th>
+                <th>Income Type</th>
+                <th>Amount</th>
+                <th>Payee</th>
+                <th>Contract</th>
+                <th>Status</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="text-xs text-ops-muted">No rows in this bucket.</td>
+                </tr>
+              ) : rows.map(row => (
+                <tr key={row.id}>
+                  <td className="text-xs font-medium">{row.title}</td>
+                  <td className="text-xs font-mono">{row.identifier}</td>
+                  <td className="text-xs">{row.rowNumber ?? '—'}</td>
+                  <td className="text-xs">{row.incomeType}</td>
+                  <td><Num val={row.amount} currency={row.currency} /></td>
+                  <td className="text-xs">{row.payee}</td>
+                  <td className="text-xs">{row.contract}</td>
+                  <td className="text-xs">{row.status}</td>
+                  <td className="text-xs text-ops-muted">{row.reason}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr style={{ borderTop: '2px solid var(--ops-border)' }}>
+                <td colSpan={8} className="text-xs font-semibold text-right pr-3 py-2">{totalLabel}</td>
+                <td className="text-xs font-semibold py-2">{totalValue}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
       </div>
     </div>
   )
