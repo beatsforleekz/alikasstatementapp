@@ -181,6 +181,11 @@ function formatAggregateAmount(
   return `${amount.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · mixed currencies`
 }
 
+function formatUnclassifiedAmount(amount: number, currencies: string[], fallbackCurrency: string) {
+  const displayAmount = Math.round(amount * 100) === 0 ? 0 : amount
+  return formatAggregateAmount(displayAmount, currencies, fallbackCurrency)
+}
+
 function deriveRowStatus(record: ReconRecord, prior: ReconRecord | undefined): RowStatusMeta {
   const chain = validateBalanceChain(record)
   const issuedMismatch =
@@ -676,7 +681,7 @@ export default function ReconciliationPage() {
             />
             <ReconStatCard
               label="Unclassified Difference"
-              value={formatAggregateAmount(currentSummary.difference.total, currentSummary.difference.currencies, defaultCurrencyForDomain(domainFilter))}
+              value={formatUnclassifiedAmount(currentSummary.difference.total, currentSummary.difference.currencies, defaultCurrencyForDomain(domainFilter))}
               sub="Anything not yet explained by a visible bucket"
               accent={currentSummary.difference.total !== 0 ? 'red' : 'default'}
             />
@@ -701,7 +706,7 @@ export default function ReconciliationPage() {
                 {' + '}
                 {roundingAdjustmentValue}
                 {' + '}
-                {formatAggregateAmount(currentSummary.difference.total, currentSummary.difference.currencies, defaultCurrencyForDomain(domainFilter))}
+                {formatUnclassifiedAmount(currentSummary.difference.total, currentSummary.difference.currencies, defaultCurrencyForDomain(domainFilter))}
               </div>
               {roundingAdjustmentTotal !== 0 && <div className="text-xs text-amber-700">Sub-cent allocations are tracked in the micro ledger; pending balances wait there until they release as a payable cent.</div>}
             </div>

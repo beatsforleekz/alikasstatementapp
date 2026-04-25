@@ -947,6 +947,7 @@ export default function StatementRunPage() {
   const [selectedImportIds, setSelectedImportIds] = useState<string[]>([])
   const [scopeRows, setScopeRows]               = useState<ScopeRow[]>([])
   const [showScopePreview, setShowScopePreview] = useState(false)
+  const [showContractScope, setShowContractScope] = useState(false)
   const [scopeRowsLoading, setScopeRowsLoading] = useState(false)
   const [scopePreviewPage, setScopePreviewPage] = useState(1)
   const [rowSearch, setRowSearch]               = useState('')
@@ -1995,7 +1996,22 @@ export default function StatementRunPage() {
       </div>
 
       <div className="card">
-        <SectionHeader title="Contract Scope" action={<span style={{ fontSize: 12, color: 'var(--ops-muted)' }}>{scopedContractsLabel}</span>} />
+        <SectionHeader
+          title="Contract Scope"
+          action={
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 12, color: 'var(--ops-muted)' }}>{scopedContractsLabel}</span>
+              <button
+                type="button"
+                className="btn-ghost btn-sm"
+                onClick={() => setShowContractScope(value => !value)}
+              >
+                {showContractScope ? 'Collapse' : 'Expand'}
+              </button>
+            </div>
+          }
+        />
+        {showContractScope && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <button className="btn-ghost btn-sm" onClick={() => { setUseAllContracts(true); setSelectedContractIds([]) }} disabled={useAllContracts}>
@@ -2073,6 +2089,7 @@ export default function StatementRunPage() {
             Selected contracts limit the next run and the visible statement list for this period. Use “Use all contracts” to restore the current all-contracts behaviour.
           </div>
         </div>
+        )}
       </div>
 
       {/* ── Pre-run currency panel ───────────────────────────────────────────

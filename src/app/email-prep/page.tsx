@@ -2,11 +2,38 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase/client'
 import { Alert, LoadingSpinner, DomainBadge, Amount, EmptyState } from '@/components/ui'
-import { Mail, CheckCircle, RefreshCw, Filter, AlertTriangle, Send } from 'lucide-react'
+import { Mail, CheckCircle, RefreshCw, Filter, AlertTriangle, Send, Copy, Trash2 } from 'lucide-react'
 import Link from 'next/link'
 import type { StatementPeriod } from '@/lib/types'
 import { getStatementCurrency } from '@/lib/utils/statementPresentation'
 import { sortByLabel } from '@/lib/utils/sortOptions'
+
+function splitPayeeNames(name: string) {
+  return name
+    .split(/\s*(?:,|&|\/|\band\b)\s*/i)
+    .map(part => part.trim())
+    .filter(Boolean)
+}
+
+function getContractPayeeNames(record: any) {
+  return (record.contract_payees ?? [])
+    .map((link: any) => String(link?.payee?.payee_name ?? '').trim())
+    .filter(Boolean)
+}
+
+function getGreetingFirstNames(record: any) {
+  const contractPayeeNames = getContractPayeeNames(record)
+  const names = (contractPayeeNames.length > 0 ? contractPayeeNames : splitPayeeNames(String(record.payee?.statement_name ?? record.payee?.payee_name ?? '').trim()))
+    .map((name: string) => name.split(/\s+/).filter(Boolean)[0] ?? '')
+    .filter(Boolean)
+  return names.join(', ')
+}
+
+function getPayeeFullName(record: any) {
+  const contractPayeeNames = getContractPayeeNames(record)
+  if (contractPayeeNames.length > 0) return contractPayeeNames.join(', ')
+  return String(record.payee?.statement_name ?? record.payee?.payee_name ?? '').trim()
+}
 
 export default function EmailPrepPage() {
   const [loading, setLoading] = useState(true)
@@ -34,7 +61,31 @@ export default function EmailPrepPage() {
         .order('created_at', { ascending: false }),
       supabase.from('statement_periods').select('*').order('year', { ascending: false }).order('half', { ascending: false }),
     ])
-    setRecords((recRes.data ?? []) as any[])
+    const baseRecords = (recRes.data ?? []) as any[]
+    const contractIds = Array.from(new Set(baseRecords.map(record => record.contract_id).filter(Boolean)))
+    let contractPayeeLinks: any[] = []
+
+    if (contractIds.length > 0) {
+      const { data: payeeLinks } = await supabase
+        .from('contract_payee_links')
+        .select('contract_id, payee_id, royalty_share, is_active, payee:payees(payee_name, statement_name, primary_email, secondary_email, currency)')
+        .eq('is_active', true)
+        .in('contract_id', contractIds)
+      contractPayeeLinks = payeeLinks ?? []
+    }
+
+    const payeesByContractId = contractPayeeLinks.reduce<Record<string, any[]>>((acc, link) => {
+      const contractId = String(link.contract_id ?? '')
+      if (!contractId) return acc
+      if (!acc[contractId]) acc[contractId] = []
+      acc[contractId].push(link)
+      return acc
+    }, {})
+
+    setRecords(baseRecords.map(record => ({
+      ...record,
+      contract_payees: payeesByContractId[record.contract_id] ?? [],
+    })))
     setPeriods(sortByLabel(perRes.data ?? [], period => period.label))
     if (perRes.data && perRes.data.length > 0 && !periodFilter) {
       setPeriodFilter(perRes.data[0].id)
@@ -59,33 +110,47 @@ export default function EmailPrepPage() {
   }
 
   function generateDefaultSubject(record: any) {
-    const name     = record.payee?.statement_name ?? record.payee?.payee_name ?? ''
+    const name     = getPayeeFullName(record)
     const period   = record.statement_period?.label ?? ''
     const contract = record.contract?.contract_name ?? ''
     const type     = record.domain === 'master' ? 'Master Royalty' : 'Publishing'
+    if (record.domain === 'publishing') {
+      return `${period} MMS Statement`
+    }
     // Include contract name so subject uniquely identifies this statement
     return `${name} — ${contract} — ${type} Statement — ${period}`
   }
 
   function generateDefaultBody(record: any) {
-    const name     = record.payee?.statement_name ?? record.payee?.payee_name ?? ''
-    const period   = record.statement_period?.label ?? ''
-    const contract = record.contract?.contract_name ?? ''
-    const type     = record.domain === 'master' ? 'Master Royalty' : 'Publishing'
+    const greetingName = getGreetingFirstNames(record) || getPayeeFullName(record)
+    const period = record.statement_period?.label ?? ''
     const currency = getStatementCurrency(record)
-    const payable = record.is_payable
-      ? `\n\nYour payable balance for this period is ${record.payable_amount.toFixed(2)} ${currency}.`
-      : record.is_recouping
-      ? `\n\nYour account remains in recoupment. Current balance: ${record.final_balance_after_carryover.toFixed(2)} ${currency}.`
-      : `\n\nYour balance of ${record.carry_forward_amount.toFixed(2)} ${currency} has been carried forward to the next statement period as it is below the minimum payment threshold.`
+    const payableAmount = new Intl.NumberFormat('en-GB', {
+      style: 'currency',
+      currency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(Number(record.payable_amount ?? 0))
 
-    return `Dear ${name},
+    if (record.is_payable && Number(record.payable_amount ?? 0) > 0) {
+      return `Dear ${greetingName},
 
-Please find attached your ${type} Statement for ${contract}, for the period ${period}.${payable}
+Please find your statement for ${period} attached.
 
-Please review the attached statement and contact us if you have any questions.
+Please send invoice for ${payableAmount} to
 
-Kind regards`
+Music Matters BYpittbull Ltd
+465C Hornsey Road
+London N19 4DR
+
+Ref: ${period} Statement - Your Full Name`
+    }
+
+    return `Dear ${greetingName},
+
+Please find your statements for ${period} attached.
+
+As payable balance is below €100 it will be forwarded onto your next statement.`
   }
 
   async function saveEmailPrep(recordId: string) {
@@ -110,6 +175,24 @@ Kind regards`
       sent_date: new Date().toISOString().split('T')[0],
       updated_at: new Date().toISOString(),
     }).eq('id', recordId)
+    await load()
+  }
+
+  async function deleteEmailPrep(recordId: string) {
+    if (!confirm('Delete this prepared email?')) return
+    await supabase.from('statement_records').update({
+      email_prepared_subject: null,
+      email_prepared_body: null,
+      email_status: 'not_prepared',
+      email_prepared_at: null,
+      email_prepared_by: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', recordId)
+    if (editingRecord === recordId) {
+      setEditingRecord(null)
+      setDraftSubject('')
+      setDraftBody('')
+    }
     await load()
   }
 
@@ -198,6 +281,7 @@ Kind regards`
               onEdit={() => startEdit(r)}
               onSave={() => saveEmailPrep(r.id)}
               onMarkSent={() => markSent(r.id)}
+              onDelete={() => deleteEmailPrep(r.id)}
               onCancel={() => setEditingRecord(null)}
               saving={savingId === r.id}
             />
@@ -210,7 +294,7 @@ Kind regards`
 
 function EmailPrepCard({
   record: r, isEditing, draftSubject, draftBody,
-  onSubjectChange, onBodyChange, onEdit, onSave, onMarkSent, onCancel, saving
+  onSubjectChange, onBodyChange, onEdit, onSave, onMarkSent, onDelete, onCancel, saving
 }: {
   record: any
   isEditing: boolean
@@ -221,12 +305,33 @@ function EmailPrepCard({
   onEdit: () => void
   onSave: () => void
   onMarkSent: () => void
+  onDelete: () => void
   onCancel: () => void
   saving: boolean
 }) {
   const isSent = r.email_status === 'sent'
   const isPrepared = r.email_status === 'prepared'
   const hasEmail = !!r.payee?.primary_email
+  const [copied, setCopied] = useState(false)
+
+  async function copyPreparedEmail() {
+    const subject = String(r.email_prepared_subject ?? '').trim()
+    const body = String(r.email_prepared_body ?? '').trim()
+    const copyText = [
+      subject ? `Subject: ${subject}` : '',
+      body,
+    ].filter(Boolean).join('\n\n')
+
+    if (!copyText) return
+
+    try {
+      await navigator.clipboard.writeText(copyText)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 2000)
+    } catch {
+      window.alert('Could not copy email text. Please copy it manually from the preview.')
+    }
+  }
 
   return (
     <div className={`card ${isSent ? 'opacity-60' : ''}`}>
@@ -328,9 +433,19 @@ function EmailPrepCard({
             <button onClick={onEdit} className="btn-secondary btn-sm">
               {isPrepared ? 'Edit Email' : 'Prepare Email'}
             </button>
+            {isPrepared && (
+              <button onClick={copyPreparedEmail} className="btn-ghost btn-sm" disabled={!r.email_prepared_subject && !r.email_prepared_body}>
+                <Copy size={12} /> {copied ? 'Copied' : 'Copy Email'}
+              </button>
+            )}
             {isPrepared && hasEmail && (
               <button onClick={onMarkSent} className="btn-success btn-sm">
                 <CheckCircle size={12} /> Mark as Sent
+              </button>
+            )}
+            {isPrepared && (
+              <button onClick={onDelete} className="btn-ghost btn-sm">
+                <Trash2 size={12} /> Delete Email Prep
               </button>
             )}
             <Link href={`/statements/${r.id}`} className="btn-ghost btn-sm">
