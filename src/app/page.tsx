@@ -9,6 +9,21 @@ import { createOpsLiveChannel } from '@/lib/utils/liveOps'
 import { IMPORT_EXCEPTION_ISSUE_TYPES } from '@/lib/utils/exceptionEngine'
 
 export default function DashboardPage() {
+  const fetchAllPaged = useCallback(async <T,>(
+    buildQuery: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: any }>
+  ) => {
+    const rows: T[] = []
+    for (let from = 0; ; from += 1000) {
+      const to = from + 999
+      const { data, error: queryError } = await buildQuery(from, to)
+      if (queryError) throw queryError
+      const batch = (data ?? []) as T[]
+      rows.push(...batch)
+      if (batch.length < 1000) break
+    }
+    return rows
+  }, [])
+
   const [loading, setLoading] = useState(true)
   const [periods, setPeriods] = useState<StatementPeriod[]>([])
   const [records, setRecords] = useState<(StatementRecord & { payee: { payee_name: string; primary_email: string | null; currency: string } })[]>([])
@@ -21,16 +36,7 @@ export default function DashboardPage() {
   const loadDashboard = useCallback(async () => {
     try {
       setLoading(true)
-      let exceptionsQuery = supabase
-        .from('exceptions')
-        .select('*, payee:payees(payee_name)')
-        .eq('resolution_status', 'open')
-        .order('created_at', { ascending: false })
-      for (const issueType of IMPORT_EXCEPTION_ISSUE_TYPES) {
-        exceptionsQuery = exceptionsQuery.neq('issue_type', issueType)
-      }
-
-      const [periodsRes, recordsRes, exceptionsRes] = await Promise.all([
+      const [periodsRes, recordsRes, allExceptions] = await Promise.all([
         supabase
           .from('statement_periods')
           .select('*')
@@ -42,16 +48,26 @@ export default function DashboardPage() {
           .select('*, payee:payees(payee_name, primary_email, currency), statement_period:statement_periods(label, year, half)')
           .order('created_at', { ascending: false })
           .limit(200),
-        exceptionsQuery,
+        fetchAllPaged<Exception>((from, to) => {
+          let query = supabase
+            .from('exceptions')
+            .select('*, payee:payees(payee_name)')
+            .eq('resolution_status', 'open')
+            .order('created_at', { ascending: false })
+            .range(from, to)
+          for (const issueType of IMPORT_EXCEPTION_ISSUE_TYPES) {
+            query = query.neq('issue_type', issueType)
+          }
+          return query
+        }),
       ])
       if (periodsRes.error) throw periodsRes.error
       if (recordsRes.error) throw recordsRes.error
-      if (exceptionsRes.error) throw exceptionsRes.error
 
       const allPeriods = periodsRes.data ?? []
       setPeriods(allPeriods)
       setRecords((recordsRes.data ?? []) as any)
-      setExceptions(exceptionsRes.data ?? [])
+      setExceptions(allExceptions)
 
       setActivePeriodId(prev => {
         if (prev && allPeriods.some(p => p.id === prev)) return prev
@@ -66,7 +82,7 @@ export default function DashboardPage() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [fetchAllPaged])
 
   useEffect(() => {
     void loadDashboard()

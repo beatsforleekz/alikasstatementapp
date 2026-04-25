@@ -14,6 +14,21 @@ type ExceptionWithJoins = Exception & {
 }
 
 export default function ExceptionsPage() {
+  const fetchAllPaged = async <T,>(
+    buildQuery: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: any }>
+  ) => {
+    const rows: T[] = []
+    for (let from = 0; ; from += 1000) {
+      const to = from + 999
+      const { data, error: queryError } = await buildQuery(from, to)
+      if (queryError) throw queryError
+      const batch = (data ?? []) as T[]
+      rows.push(...batch)
+      if (batch.length < 1000) break
+    }
+    return rows
+  }
+
   const [loading, setLoading] = useState(true)
   const [exceptions, setExceptions] = useState<ExceptionWithJoins[]>([])
   const [periods, setPeriods] = useState<StatementPeriod[]>([])
@@ -29,15 +44,17 @@ export default function ExceptionsPage() {
 
   async function load() {
     setLoading(true)
-    const [excRes, perRes] = await Promise.all([
-      supabase
-        .from('exceptions')
-        .select('*, payee:payees(payee_name), statement_period:statement_periods(label)')
-        .order('created_at', { ascending: false }),
+    const [allExc, perRes] = await Promise.all([
+      fetchAllPaged<ExceptionWithJoins>((from, to) =>
+        supabase
+          .from('exceptions')
+          .select('*, payee:payees(payee_name), statement_period:statement_periods(label)')
+          .order('created_at', { ascending: false })
+          .range(from, to)
+      ),
       supabase.from('statement_periods').select('*').order('year', { ascending: false }).order('half', { ascending: false }),
     ])
 
-    const allExc = (excRes.data ?? []) as ExceptionWithJoins[]
     const importExceptionIds = allExc
       .filter(e => isImportExceptionIssueType(e.issue_type))
       .map(e => e.id)

@@ -691,7 +691,14 @@ export default function ImportsPage() {
   async function loadRefData() {
     const [pd, py, co, pl, rp, al, sp, crl] = await Promise.all([
       supabase.from('statement_periods').select('*').order('year', { ascending: false }).order('half', { ascending: false }),
-      supabase.from('payees').select('*').eq('active_status', true),
+      fetchAllPaged((from, to) =>
+        supabase
+          .from('payees')
+          .select('*')
+          .eq('active_status', true)
+          .order('payee_name')
+          .range(from, to)
+      ),
       fetchAllPaged((from, to) =>
         supabase.from('contracts').select('*').eq('status', 'active').order('contract_name').range(from, to)
       ),
@@ -707,7 +714,14 @@ export default function ImportsPage() {
       fetchAllPaged((from, to) =>
         supabase.from('repertoire').select('*').order('title').range(from, to)
       ),
-      supabase.from('payee_aliases').select('*').eq('is_active', true),
+      fetchAllPaged((from, to) =>
+        supabase
+          .from('payee_aliases')
+          .select('*')
+          .eq('is_active', true)
+          .order('alias_name')
+          .range(from, to)
+      ),
       fetchAllPaged((from, to) =>
         supabase
           .from('contract_repertoire_payee_splits')
@@ -727,11 +741,11 @@ export default function ImportsPage() {
       ),
     ])
     setPeriods(sortByLabel(pd.data ?? [], period => period.label))
-    setPayees(sortByLabel(py.data ?? [], payee => payee.payee_name))
+    setPayees(sortByLabel(py ?? [], payee => payee.payee_name))
     setContracts(sortByLabel(co ?? [], contract => contract.contract_name))
     setPayeeLinks(pl ?? [])
     setRepertoire(rp ?? [])
-    setAliases(al.data ?? [])
+    setAliases(al ?? [])
     setSplits(sp ?? [])
     setContractRepertoireLinks(crl ?? [])
     const current = (pd.data ?? []).find((p: any) => p.is_current) ?? pd.data?.[0]

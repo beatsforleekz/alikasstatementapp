@@ -95,6 +95,21 @@ function ContractCostsPanel({
   const [saving, setSaving]       = useState(false)
   const [err, setErr]             = useState<string | null>(null)
 
+  const fetchAllPaged = async <T,>(
+    buildQuery: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: any }>
+  ) => {
+    const rows: T[] = []
+    for (let from = 0; ; from += 1000) {
+      const to = from + 999
+      const { data, error: queryError } = await buildQuery(from, to)
+      if (queryError) throw queryError
+      const batch = (data ?? []) as T[]
+      rows.push(...batch)
+      if (batch.length < 1000) break
+    }
+    return rows
+  }
+
   const fetchCosts = async () => {
     setLoading(true)
     // Fetch costs for this contract that either:
@@ -115,8 +130,7 @@ function ContractCostsPanel({
       )
     }
 
-    const { data } = await q
-    const result = data ?? []
+    const result = await fetchAllPaged<ContractCost>((from, to) => q.range(from, to))
     setCosts(result)
     onCostsChange(result)
     setLoading(false)
@@ -734,6 +748,21 @@ function PivotedStatementTable({
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function StatementDetailPage() {
+  const fetchAllPaged = async <T,>(
+    buildQuery: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: any }>
+  ) => {
+    const rows: T[] = []
+    for (let from = 0; ; from += 1000) {
+      const to = from + 999
+      const { data, error: queryError } = await buildQuery(from, to)
+      if (queryError) throw queryError
+      const batch = (data ?? []) as T[]
+      rows.push(...batch)
+      if (batch.length < 1000) break
+    }
+    return rows
+  }
+
   const params = useParams()
   const searchParams = useSearchParams()
   const id = params.id as string
@@ -772,33 +801,45 @@ export default function StatementDetailPage() {
           .select('*, payee:payees(*), contract:contracts(*), statement_period:statement_periods(*)')
           .eq('id', id)
           .single(),
-        supabase
-          .from('exceptions')
-          .select('*')
-          .eq('statement_record_id', id)
-          .order('severity'),
-        supabase
-          .from('approval_log')
-          .select('*')
-          .eq('statement_record_id', id)
-          .order('approved_at', { ascending: false }),
-        supabase
-          .from('statement_outputs')
-          .select('*')
-          .eq('statement_record_id', id)
-          .order('generated_at', { ascending: false }),
-        supabase
-          .from('statement_line_summaries')
-          .select('*')
-          .eq('statement_record_id', id)
-          .order('line_category'),
+        fetchAllPaged<Exception>((from, to) =>
+          supabase
+            .from('exceptions')
+            .select('*')
+            .eq('statement_record_id', id)
+            .order('severity')
+            .range(from, to)
+        ),
+        fetchAllPaged<ApprovalLog>((from, to) =>
+          supabase
+            .from('approval_log')
+            .select('*')
+            .eq('statement_record_id', id)
+            .order('approved_at', { ascending: false })
+            .range(from, to)
+        ),
+        fetchAllPaged<StatementOutput>((from, to) =>
+          supabase
+            .from('statement_outputs')
+            .select('*')
+            .eq('statement_record_id', id)
+            .order('generated_at', { ascending: false })
+            .range(from, to)
+        ),
+        fetchAllPaged<StatementLineSummary>((from, to) =>
+          supabase
+            .from('statement_line_summaries')
+            .select('*')
+            .eq('statement_record_id', id)
+            .order('line_category')
+            .range(from, to)
+        ),
       ])
       if (recRes.error) throw recRes.error
       setRecord(recRes.data)
-      setExceptions(excRes.data ?? [])
-      setApprovalLog(logRes.data ?? [])
-      setOutputs(outRes.data ?? [])
-      setLines(lineRes.data ?? [])
+      setExceptions(excRes)
+      setApprovalLog(logRes)
+      setOutputs(outRes)
+      setLines(lineRes)
     } catch (e: any) {
       setError(e.message)
     } finally {

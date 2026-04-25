@@ -1322,7 +1322,7 @@ export default function StatementRunPage() {
         ? periodsChronological[currentPeriodIndex + 1]?.id ?? null
         : null
 
-      const [lD, { data: cvD }, fcD, spD, crlD, costD, microAllocationRows, previousStatementRows] = await Promise.all([
+      const [lD, cvD, fcD, spD, crlD, costD, microAllocationRows, previousStatementRows] = await Promise.all([
         fetchAllPaged<any>((from, to) =>
           supabase
             .from('contract_payee_links')
@@ -1332,7 +1332,15 @@ export default function StatementRunPage() {
             .order('payee_id')
             .range(from, to)
         ),
-        supabase.from('carryover_ledger').select('*').eq('to_period_id', selectedPeriodId),
+        fetchAllPaged<any>((from, to) =>
+          supabase
+            .from('carryover_ledger')
+            .select('*')
+            .eq('to_period_id', selectedPeriodId)
+            .order('contract_id')
+            .order('payee_id')
+            .range(from, to)
+        ),
         fetchAllPaged<any>((from, to) =>
           supabase.from('contracts').select('*').order('contract_name').range(from, to)
         ),

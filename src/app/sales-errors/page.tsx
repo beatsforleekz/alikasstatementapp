@@ -11,7 +11,7 @@ import {
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import { processImportRow } from '@/lib/utils/matchingEngine'
-import { isPublishingContractType, type Repertoire, type Contract } from '@/lib/types'
+import { isPublishingContractType, type Repertoire, type Contract, type Payee } from '@/lib/types'
 import {
   buildPublishingAllocationRoutes,
   type ContractRepertoireAllocationLink,
@@ -331,7 +331,14 @@ export default function SalesErrorsPage() {
       fetchAllPaged<Contract>((from, to) =>
         supabase.from('contracts').select('*').eq('status', 'active').order('contract_name').range(from, to)
       ),
-      supabase.from('payees').select('*').eq('active_status', true),
+      fetchAllPaged<Payee>((from, to) =>
+        supabase
+          .from('payees')
+          .select('*')
+          .eq('active_status', true)
+          .order('payee_name')
+          .range(from, to)
+      ),
       fetchAllPaged<any>((from, to) =>
         supabase
           .from('contract_payee_links')
@@ -341,7 +348,14 @@ export default function SalesErrorsPage() {
           .order('payee_id')
           .range(from, to)
       ),
-      supabase.from('payee_aliases').select('*').eq('is_active', true),
+      fetchAllPaged<any>((from, to) =>
+        supabase
+          .from('payee_aliases')
+          .select('*')
+          .eq('is_active', true)
+          .order('alias_name')
+          .range(from, to)
+      ),
       fetchAllPaged<any>((from, to) =>
         supabase
           .from('contract_repertoire_payee_splits')
@@ -365,9 +379,9 @@ export default function SalesErrorsPage() {
     const fresh = {
       repertoire:              rpRes,
       contracts:               coRes,
-      payees:                  pyRes.data ?? [],
+      payees:                  pyRes,
       payeeLinks:              plRes,
-      aliases:                 alRes.data ?? [],
+      aliases:                 alRes,
       splits:                  spRes,
       contractRepertoireLinks: crlRes,
     }
