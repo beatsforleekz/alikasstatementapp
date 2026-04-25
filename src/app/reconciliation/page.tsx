@@ -717,8 +717,13 @@ export default function ReconciliationPage() {
       ) : (
         <>
           <div
-            className="flex flex-wrap"
-            style={{ gap: 16, alignItems: 'stretch' }}
+            className="grid"
+            style={{
+              gap: 16,
+              width: '100%',
+              justifyContent: 'start',
+              gridTemplateColumns: 'repeat(auto-fit, 220px)',
+            }}
           >
             <ReconStatCard
               label="Import Total"
@@ -1292,8 +1297,11 @@ function ReconStatCard({
       className={`card border ${tone}`}
       style={{
         flex: '0 0 220px',
+        width: 220,
+        minWidth: 220,
         maxWidth: 220,
         minHeight: 130,
+        overflow: 'hidden',
       }}
     >
       <div className="card-body space-y-1.5">
