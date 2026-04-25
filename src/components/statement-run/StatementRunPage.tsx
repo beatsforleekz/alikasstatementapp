@@ -30,7 +30,7 @@ import {
   type StatementGenerationPreviousStatementCarryover,
 } from '@/lib/utils/statementGeneration'
 import type { StatementOutputData } from '@/lib/utils/outputGenerator'
-import { generateStatementPdf } from '@/lib/utils/statementPdf'
+import { generateCSV, downloadCSV } from '@/lib/utils/outputGenerator'
 import { buildZipArchive } from '@/lib/utils/simpleZip'
 import {
   buildPublishingAllocationRoutes,
@@ -62,12 +62,14 @@ interface RunRecord {
   is_recouping: boolean
   carryover_rule_applied: boolean
   hold_payment_flag: boolean
+  manual_override_flag?: boolean | null
   balance_confirmed_flag: boolean
   carryover_confirmed_flag: boolean
   calculation_status: string
   approval_status: string
   output_generated_flag: boolean
   email_status: string
+  sent_date?: string | null
   payee?: { payee_name: string; primary_email: string | null; currency: string } | null
   contract?: { contract_name: string; contract_code: string | null } | null
   statement_period?: { label: string } | null
@@ -932,7 +934,7 @@ export default function StatementRunPage() {
   const urlPeriodId = searchParams.get('period') ?? ''
   const urlApproval = searchParams.get('approval') ?? ''
   const urlPayable = searchParams.get('payable') ?? ''
-  const urlRecoup = (searchParams.get('recoup') ?? '') as '' | 'recouped' | 'unrecouped'
+  const urlRecoup = (searchParams.get('recoup') ?? '') as '' | 'recoupable' | 'recouped'
   const rawUrlSort = searchParams.get('sort') ?? ''
   const urlSort = rawUrlSort === 'az' || rawUrlSort === 'za' ? rawUrlSort : ''
 
@@ -962,7 +964,7 @@ export default function StatementRunPage() {
   const [approvalFilter, setApprovalFilter]     = useState(urlApproval)
   const [payableFilter, setPayableFilter]       = useState(urlPayable)
   const [statementSort, setStatementSort]       = useState<'az' | 'za'>(urlSort || 'az')
-  const [recoupFilter, setRecoupFilter]         = useState<'' | 'recouped' | 'unrecouped'>(urlRecoup)
+  const [recoupFilter, setRecoupFilter]         = useState<'' | 'recoupable' | 'recouped'>(urlRecoup)
   const [running, setRunning]                   = useState(false)
   const [runSoftBlock, setRunSoftBlock]         = useState<null | { unresolvedImports: ImportSummary[]; totalUnresolved: number }>(null)
   const [saving, setSaving]                     = useState<string | null>(null)
@@ -1116,9 +1118,8 @@ export default function StatementRunPage() {
       .order('is_payable', { ascending: false })
       .order('payable_amount', { ascending: false })
     if (approvalFilter) q = q.eq('approval_status', approvalFilter)
-    if (payableFilter === 'payable')   q = q.eq('is_payable', true)
-    if (payableFilter === 'recouping') q = q.eq('is_recouping', true)
-    if (payableFilter === 'carry')     q = q.gt('carry_forward_amount', 0)
+    if (payableFilter === 'payable') q = q.eq('is_payable', true)
+    if (payableFilter === 'carry')   q = q.gt('carry_forward_amount', 0)
     const { data, error: err } = await q
     if (err) setError(err.message)
     else {
@@ -1760,8 +1761,8 @@ export default function StatementRunPage() {
     : `${selectedContractIds.length} selected`
   const visibleRecords = records
     .filter(record => {
+      if (recoupFilter === 'recoupable') return record.is_recouping
       if (recoupFilter === 'recouped') return !record.is_recouping
-      if (recoupFilter === 'unrecouped') return record.is_recouping
       return true
     })
     .slice()
@@ -1851,63 +1852,120 @@ export default function StatementRunPage() {
     setSelectedRecordIds(new Set(visibleRecords.map(record => record.id)))
   }
 
-  const downloadSelectedStatementsZip = async () => {
+  const fetchStatementLinesByRecord = async (recordIds: string[]) => {
+    const lineRows = await fetchAllPaged<any>((from, to) =>
+      supabase
+        .from('statement_line_summaries')
+        .select('*')
+        .in('statement_record_id', recordIds)
+        .order('statement_record_id')
+        .order('title')
+        .range(from, to)
+    )
+    const linesByRecord = new Map<string, any[]>()
+    for (const line of lineRows) {
+      const list = linesByRecord.get(line.statement_record_id) ?? []
+      list.push(line)
+      linesByRecord.set(line.statement_record_id, list)
+    }
+    return linesByRecord
+  }
+
+  const buildStatementOutputData = (record: RunRecord, linesByRecord: Map<string, any[]>): StatementOutputData => ({
+    record: record as any,
+    payee_name: record.payee?.payee_name ?? record.payee_id,
+    statement_name: record.payee?.payee_name ?? record.payee_id,
+    contract_name: record.contract?.contract_name ?? record.contract_id,
+    contract_code: record.contract?.contract_code ?? null,
+    period_label: record.statement_period?.label ?? selectedPeriod?.label ?? 'Statement',
+    period_start: '',
+    period_end: '',
+    currency: record.statement_currency ?? record.payee?.currency ?? 'GBP',
+    lines: linesByRecord.get(record.id) ?? [],
+  })
+
+  const downloadSelectedStatementsCsvZip = async () => {
     const selected = visibleRecords.filter(record => selectedRecordIds.has(record.id))
     if (selected.length === 0) return
-    setSaving('__bulk_download__')
+    setSaving('__bulk_csv_zip__')
     setError(null)
     try {
       const recordIds = selected.map(record => record.id)
-      const lineRows = await fetchAllPaged<any>((from, to) =>
-        supabase
-          .from('statement_line_summaries')
-          .select('*')
-          .in('statement_record_id', recordIds)
-          .order('statement_record_id')
-          .order('title')
-          .range(from, to)
-      )
-      const linesByRecord = new Map<string, any[]>()
-      for (const line of lineRows) {
-        const list = linesByRecord.get(line.statement_record_id) ?? []
-        list.push(line)
-        linesByRecord.set(line.statement_record_id, list)
-      }
-      const files = await Promise.all(selected.map(async record => {
+      const linesByRecord = await fetchStatementLinesByRecord(recordIds)
+      const encoder = new TextEncoder()
+      const files = selected.map(record => {
         const payeeName = (record.payee?.payee_name ?? record.payee_id).replace(/[^a-zA-Z0-9]+/g, '_')
         const contractName = (record.contract?.contract_code ?? record.contract?.contract_name ?? record.contract_id).replace(/[^a-zA-Z0-9]+/g, '_')
         const periodLabel = (record.statement_period?.label ?? selectedPeriod?.label ?? 'statement').replace(/[^a-zA-Z0-9]+/g, '_')
-        const output: StatementOutputData = {
-          record: record as any,
-          payee_name: record.payee?.payee_name ?? record.payee_id,
-          statement_name: record.payee?.payee_name ?? record.payee_id,
-          contract_name: record.contract?.contract_name ?? record.contract_id,
-          contract_code: record.contract?.contract_code ?? null,
-          period_label: record.statement_period?.label ?? selectedPeriod?.label ?? 'Statement',
-          period_start: '',
-          period_end: '',
-          currency: record.statement_currency ?? record.payee?.currency ?? 'GBP',
-          lines: linesByRecord.get(record.id) ?? [],
-        }
+        const output = buildStatementOutputData(record, linesByRecord)
         return {
-          name: `${payeeName}__${contractName}__${periodLabel}.pdf`,
-          data: await generateStatementPdf(output),
+          name: `${payeeName}__${contractName}__${periodLabel}.csv`,
+          data: encoder.encode(generateCSV(output)),
         }
-      }))
+      })
       const zipBlob = buildZipArchive(files)
       const url = URL.createObjectURL(zipBlob)
       const link = document.createElement('a')
       link.href = url
-      link.download = `${domain}_${selectedPeriod?.label ?? 'statements'}_selected.zip`.replace(/[^a-zA-Z0-9_.-]+/g, '_')
+      link.download = `${domain}_${selectedPeriod?.label ?? 'statements'}_selected_csv.zip`.replace(/[^a-zA-Z0-9_.-]+/g, '_')
       link.click()
       URL.revokeObjectURL(url)
     } catch (e: any) {
       setError(e?.message
-        ? `Statement PDF export failed: ${e.message}`
-        : 'Statement PDF export failed. Please try again.')
+        ? `Statement CSV export failed: ${e.message}`
+        : 'Statement CSV export failed. Please try again.')
     } finally {
       setSaving(null)
     }
+  }
+
+  const downloadStatementListCsv = () => {
+    const headers = [
+      'Payee',
+      'Contract',
+      'Period',
+      'Domain',
+      'Currency',
+      'Current Period Earnings',
+      'Deductions',
+      'Carryover In',
+      'Final Balance',
+      'Payable Amount',
+      'Carry Forward',
+      'Approval Status',
+      'Email Status',
+      'Sent Date',
+      'Hold Flag',
+      'Manual Override Flag',
+    ]
+    const escape = (value: string | number | boolean | null | undefined) => {
+      if (value === null || value === undefined) return ''
+      const text = String(value)
+      return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+    }
+    const rows = records.map(record => ([
+      record.payee?.payee_name ?? record.payee_id,
+      record.contract?.contract_name ?? record.contract?.contract_code ?? record.contract_id,
+      record.statement_period?.label ?? selectedPeriod?.label ?? '',
+      record.domain,
+      record.statement_currency ?? record.payee?.currency ?? 'GBP',
+      Number(record.current_earnings ?? 0),
+      Number(record.deductions ?? 0),
+      Number(record.prior_period_carryover_applied ?? 0),
+      Number(record.final_balance_after_carryover ?? 0),
+      Number(record.payable_amount ?? 0),
+      Number(record.carry_forward_amount ?? 0),
+      record.approval_status ?? '',
+      record.email_status ?? '',
+      record.sent_date ?? '',
+      record.hold_payment_flag ? 'true' : 'false',
+      record.manual_override_flag ? 'true' : 'false',
+    ]))
+    const csv = [headers, ...rows].map(row => row.map(escape).join(',')).join('\n')
+    downloadCSV(
+      csv,
+      `${domain}_${selectedPeriod?.label ?? 'statements'}_statement_list.csv`.replace(/[^a-zA-Z0-9_.-]+/g, '_')
+    )
   }
 
   const toggleImportSelection = (importId: string) => {
@@ -1975,6 +2033,9 @@ export default function StatementRunPage() {
               <Link2 size={13} /> Link Work
             </button>
           )}
+          <button onClick={downloadStatementListCsv} className="btn-ghost btn-sm" style={{ display: 'flex', alignItems: 'center', gap: 5 }} disabled={records.length === 0}>
+            <Download size={13} /> Statement List CSV
+          </button>
           <button onClick={() => setShowContractForm(true)} className="btn-ghost btn-sm" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
             <Plus size={13} /> Contract
           </button>
@@ -2031,7 +2092,6 @@ export default function StatementRunPage() {
           <option value="">All balance states</option>
           <option value="payable">Payable</option>
           <option value="carry">Carry Forward</option>
-          <option value="recouping">Recouping</option>
         </select>
         <input
           style={{ ...iStyle, minWidth: 260, flex: '1 1 260px' }}
@@ -2517,10 +2577,15 @@ export default function StatementRunPage() {
               <option value="az">A–Z</option>
               <option value="za">Z–A</option>
             </select>
+            <select style={iStyle} value={payableFilter} onChange={e => setPayableFilter(e.target.value)}>
+              <option value="">All balance states</option>
+              <option value="payable">Payable</option>
+              <option value="carry">Carry Forward</option>
+            </select>
             <select style={iStyle} value={recoupFilter} onChange={e => setRecoupFilter(e.target.value as any)}>
               <option value="">All recoup states</option>
+              <option value="recoupable">Recoupable</option>
               <option value="recouped">Recouped</option>
-              <option value="unrecouped">Unrecouped</option>
             </select>
           </div>
           {someRecordsSelected && (
@@ -2529,10 +2594,13 @@ export default function StatementRunPage() {
                 <input type="checkbox" checked={allVisibleRecordsSelected} onChange={toggleAllVisibleRecords} />
                 {selectedRecordIds.size} selected
               </label>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                <span style={{ fontSize: 12, color: 'var(--ops-muted)' }}>
+                  Bulk PDF export coming soon — CSV exports are available below, and single statement print/export still works
+                </span>
                 <button className="btn-ghost btn-sm" onClick={() => setSelectedRecordIds(new Set())}>Clear</button>
-                <button className="btn-secondary btn-sm" onClick={() => { void downloadSelectedStatementsZip() }} disabled={saving === '__bulk_download__'}>
-                  {saving === '__bulk_download__' ? <LoadingSpinner size={11} /> : <><Download size={12} /> Download Selected (ZIP)</>}
+                <button className="btn-secondary btn-sm" onClick={() => { void downloadSelectedStatementsCsvZip() }} disabled={saving === '__bulk_csv_zip__'}>
+                  {saving === '__bulk_csv_zip__' ? <LoadingSpinner size={11} /> : <><Download size={12} /> Download Selected CSVs (ZIP)</>}
                 </button>
                 <button className="btn-ghost btn-sm" style={{ color: 'var(--accent-red)' }} onClick={deleteSelectedRecords} disabled={saving === '__bulk_delete__'}>
                   {saving === '__bulk_delete__' ? <LoadingSpinner size={11} /> : 'Delete selected'}
