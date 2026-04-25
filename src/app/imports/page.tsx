@@ -692,8 +692,18 @@ export default function ImportsPage() {
     const [pd, py, co, pl, rp, al, sp, crl] = await Promise.all([
       supabase.from('statement_periods').select('*').order('year', { ascending: false }).order('half', { ascending: false }),
       supabase.from('payees').select('*').eq('active_status', true),
-      supabase.from('contracts').select('*').eq('status', 'active'),
-      supabase.from('contract_payee_links').select('*').eq('is_active', true),
+      fetchAllPaged((from, to) =>
+        supabase.from('contracts').select('*').eq('status', 'active').order('contract_name').range(from, to)
+      ),
+      fetchAllPaged((from, to) =>
+        supabase
+          .from('contract_payee_links')
+          .select('*')
+          .eq('is_active', true)
+          .order('contract_id')
+          .order('payee_id')
+          .range(from, to)
+      ),
       fetchAllPaged((from, to) =>
         supabase.from('repertoire').select('*').order('title').range(from, to)
       ),
@@ -718,8 +728,8 @@ export default function ImportsPage() {
     ])
     setPeriods(sortByLabel(pd.data ?? [], period => period.label))
     setPayees(sortByLabel(py.data ?? [], payee => payee.payee_name))
-    setContracts(sortByLabel(co.data ?? [], contract => contract.contract_name))
-    setPayeeLinks(pl.data ?? [])
+    setContracts(sortByLabel(co ?? [], contract => contract.contract_name))
+    setPayeeLinks(pl ?? [])
     setRepertoire(rp ?? [])
     setAliases(al.data ?? [])
     setSplits(sp ?? [])

@@ -41,7 +41,7 @@ export default function EmailPrepPage() {
   const [periods, setPeriods] = useState<StatementPeriod[]>([])
   const [periodFilter, setPeriodFilter] = useState('')
   const [domainFilter, setDomainFilter] = useState('')
-  const [statusFilter, setStatusFilter] = useState('not_sent')
+  const [statusFilter, setStatusFilter] = useState('open')
   const [error, setError] = useState<string | null>(null)
   const [editingRecord, setEditingRecord] = useState<string | null>(null)
   const [draftSubject, setDraftSubject] = useState('')
@@ -96,9 +96,10 @@ export default function EmailPrepPage() {
   const filtered = records.filter(r => {
     if (periodFilter && r.statement_period_id !== periodFilter) return false
     if (domainFilter && r.domain !== domainFilter) return false
-    if (statusFilter === 'not_sent' && r.email_status === 'sent') return false
+    if (statusFilter === 'open' && r.email_status === 'sent') return false
     if (statusFilter === 'sent' && r.email_status !== 'sent') return false
     if (statusFilter === 'prepared' && r.email_status !== 'prepared') return false
+    if (statusFilter === 'not_prepared' && r.email_status !== 'not_prepared') return false
     if (statusFilter === 'missing_email' && r.payee?.primary_email) return false
     return true
   })
@@ -250,9 +251,10 @@ As payable balance is below €100 it will be forwarded onto your next statement
         </select>
         <select className="ops-select w-40" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
           <option value="">All</option>
+          <option value="open">Open / not sent</option>
           <option value="missing_email">Missing email</option>
-          <option value="not_sent">Not sent</option>
           <option value="prepared">Prepared</option>
+          <option value="not_prepared">Not prepared</option>
           <option value="sent">Sent</option>
         </select>
       </div>
@@ -312,6 +314,7 @@ function EmailPrepCard({
   const isSent = r.email_status === 'sent'
   const isPrepared = r.email_status === 'prepared'
   const hasEmail = !!r.payee?.primary_email
+  const statementCurrency = getStatementCurrency(r)
   const [copied, setCopied] = useState(false)
 
   async function copyPreparedEmail() {
@@ -345,7 +348,7 @@ function EmailPrepCard({
           <span className="font-mono text-xs text-ops-muted">{r.statement_period?.label}</span>
           {r.is_payable && (
             <span className="text-green-400 font-mono text-xs font-bold">
-              {r.payable_amount.toFixed(2)} {r.payee?.currency}
+              {r.payable_amount.toFixed(2)} {statementCurrency}
             </span>
           )}
           {r.is_recouping && <span className="badge-recouping">Recouping</span>}

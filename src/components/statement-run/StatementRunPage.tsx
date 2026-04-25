@@ -56,6 +56,7 @@ interface RunRecord {
   prior_period_carryover_applied: number
   final_balance_after_carryover: number
   payable_amount: number
+  issued_amount?: number | null
   carry_forward_amount: number
   is_payable: boolean
   is_recouping: boolean
@@ -118,10 +119,6 @@ type UnresolvedImportRow = {
   net_amount: number | null
   row_type: string | null
   excluded_flag: boolean
-}
-
-function getStatementListAmount(record: Pick<RunRecord, 'final_balance_after_carryover'>) {
-  return Number(record.final_balance_after_carryover ?? 0)
 }
 
 function isPublishingStatementEligibleRow(
@@ -936,7 +933,8 @@ export default function StatementRunPage() {
   const urlApproval = searchParams.get('approval') ?? ''
   const urlPayable = searchParams.get('payable') ?? ''
   const urlRecoup = (searchParams.get('recoup') ?? '') as '' | 'recouped' | 'unrecouped'
-  const urlSort = (searchParams.get('sort') ?? '') as '' | 'az' | 'za' | 'highest_payable' | 'lowest_payable'
+  const rawUrlSort = searchParams.get('sort') ?? ''
+  const urlSort = rawUrlSort === 'az' || rawUrlSort === 'za' ? rawUrlSort : ''
 
   const [loading, setLoading]                   = useState(true)
   const [periods, setPeriods]                   = useState<StatementPeriod[]>([])
@@ -963,7 +961,7 @@ export default function StatementRunPage() {
   const [selectedRecordIds, setSelectedRecordIds] = useState<Set<string>>(new Set())
   const [approvalFilter, setApprovalFilter]     = useState(urlApproval)
   const [payableFilter, setPayableFilter]       = useState(urlPayable)
-  const [statementSort, setStatementSort]       = useState<'az' | 'za' | 'highest_payable' | 'lowest_payable'>(urlSort || 'highest_payable')
+  const [statementSort, setStatementSort]       = useState<'az' | 'za'>(urlSort || 'az')
   const [recoupFilter, setRecoupFilter]         = useState<'' | 'recouped' | 'unrecouped'>(urlRecoup)
   const [running, setRunning]                   = useState(false)
   const [runSoftBlock, setRunSoftBlock]         = useState<null | { unresolvedImports: ImportSummary[]; totalUnresolved: number }>(null)
@@ -1011,7 +1009,7 @@ export default function StatementRunPage() {
     else params.delete('payable')
     if (recoupFilter) params.set('recoup', recoupFilter)
     else params.delete('recoup')
-    if (statementSort && statementSort !== 'highest_payable') params.set('sort', statementSort)
+    if (statementSort && statementSort !== 'az') params.set('sort', statementSort)
     else params.delete('sort')
     const next = `${pathname}?${params.toString()}`
     const current = `${pathname}?${searchParams.toString()}`
@@ -1110,12 +1108,6 @@ export default function StatementRunPage() {
   }
 
   const loadRecords = async () => {
-    if (!useAllContracts && selectedContractIds.length === 0) {
-      setRecords([])
-      setSelectedRecordIds(new Set())
-      return
-    }
-
     let q = supabase
       .from('statement_records')
       .select('*, payee:payees(payee_name,primary_email,currency), contract:contracts(contract_name,contract_code), statement_period:statement_periods(label)')
@@ -1123,7 +1115,6 @@ export default function StatementRunPage() {
       .eq('domain', domain)
       .order('is_payable', { ascending: false })
       .order('payable_amount', { ascending: false })
-    if (!useAllContracts) q = q.in('contract_id', selectedContractIds)
     if (approvalFilter) q = q.eq('approval_status', approvalFilter)
     if (payableFilter === 'payable')   q = q.eq('is_payable', true)
     if (payableFilter === 'recouping') q = q.eq('is_recouping', true)
@@ -1448,7 +1439,37 @@ export default function StatementRunPage() {
         restrictToSelectedContracts: !useAllContracts,
       })
 
+      if (!useAllContracts && selectedContractIds.length === 0) {
+        setError('Select at least one contract before running a scoped rerun.')
+        setRunning(false)
+        return
+      }
+
+      const draftKeySet = new Set(drafts.map(draft => `${draft.contract_id}::${draft.payee_id}`))
+      const riskyExistingRecords = records.filter(record =>
+        draftKeySet.has(`${record.contract_id}::${record.payee_id}`) &&
+        (record.approval_status === 'approved' || Number(record.issued_amount ?? 0) !== 0)
+      )
+
+      if (riskyExistingRecords.length > 0) {
+        const preview = riskyExistingRecords
+          .slice(0, 5)
+          .map(record => `${record.payee?.payee_name ?? record.payee_id} · ${record.contract?.contract_name ?? record.contract_id}`)
+          .join('\n')
+        const summary = riskyExistingRecords.length > 5
+          ? `${preview}\n…plus ${riskyExistingRecords.length - 5} more`
+          : preview
+        const confirmed = window.confirm(
+          `This rerun will update ${riskyExistingRecords.length} approved or issued statement${riskyExistingRecords.length !== 1 ? 's' : ''}.\n\n${summary}\n\nContinue?`
+        )
+        if (!confirmed) {
+          setRunning(false)
+          return
+        }
+      }
+
       const touchedRecordIds = new Set<string>()
+      const touchedStatementKeys = new Set<string>()
       const carryoverLedgerRows: Array<Record<string, any>> = []
       if (microCarryRows.length > 0) {
         const rows = microCarryRows.map(row => ({
@@ -1521,6 +1542,7 @@ export default function StatementRunPage() {
           recordId = ins!.id; diag.statements_created++
         }
         touchedRecordIds.add(recordId)
+        touchedStatementKeys.add(`${draft.contract_id}::${draft.payee_id}`)
 
         if (nextPeriodId) {
           const carryReason = draft.payload.is_recouping
@@ -1613,12 +1635,26 @@ export default function StatementRunPage() {
       }
 
       if (nextPeriodId) {
-        await supabase
-          .from('carryover_ledger')
-          .delete()
-          .eq('from_period_id', selectedPeriodId)
-          .eq('domain', domain)
-          .eq('created_by', 'Statement Run')
+        if (useAllContracts) {
+          await supabase
+            .from('carryover_ledger')
+            .delete()
+            .eq('from_period_id', selectedPeriodId)
+            .eq('domain', domain)
+            .eq('created_by', 'Statement Run')
+        } else {
+          for (const key of Array.from(touchedStatementKeys)) {
+            const [contractId, payeeId] = key.split('::')
+            await supabase
+              .from('carryover_ledger')
+              .delete()
+              .eq('from_period_id', selectedPeriodId)
+              .eq('domain', domain)
+              .eq('created_by', 'Statement Run')
+              .eq('contract_id', contractId)
+              .eq('payee_id', payeeId)
+          }
+        }
 
         if (carryoverLedgerRows.length > 0) {
           await supabase
@@ -1719,9 +1755,7 @@ export default function StatementRunPage() {
     .slice()
     .sort((a, b) => {
       if (statementSort === 'az') return (a.payee?.payee_name ?? '').localeCompare(b.payee?.payee_name ?? '')
-      if (statementSort === 'za') return (b.payee?.payee_name ?? '').localeCompare(a.payee?.payee_name ?? '')
-      if (statementSort === 'lowest_payable') return getStatementListAmount(a) - getStatementListAmount(b)
-      return getStatementListAmount(b) - getStatementListAmount(a)
+      return (b.payee?.payee_name ?? '').localeCompare(a.payee?.payee_name ?? '')
     })
   const allVisibleRecordsSelected = visibleRecords.length > 0 && visibleRecords.every(record => selectedRecordIds.has(record.id))
   const someRecordsSelected = selectedRecordIds.size > 0
@@ -2086,7 +2120,7 @@ export default function StatementRunPage() {
             )}
           </div>
           <div style={{ fontSize: 11, color: 'var(--ops-subtle)' }}>
-            Selected contracts limit the next run and the visible statement list for this period. Use “Use all contracts” to restore the current all-contracts behaviour.
+            Selected contracts limit the next run only. Existing statements outside the current scope remain visible and untouched unless you run a full rerun.
           </div>
         </div>
         )}
@@ -2461,11 +2495,9 @@ export default function StatementRunPage() {
             }
           />
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '0 4px 12px', flexWrap: 'wrap' }}>
-            <select style={iStyle} value={statementSort} onChange={e => setStatementSort(e.target.value as any)}>
+            <select style={iStyle} value={statementSort} onChange={e => setStatementSort(e.target.value as 'az' | 'za')}>
               <option value="az">A–Z</option>
               <option value="za">Z–A</option>
-              <option value="highest_payable">Highest payable</option>
-              <option value="lowest_payable">Lowest payable</option>
             </select>
             <select style={iStyle} value={recoupFilter} onChange={e => setRecoupFilter(e.target.value as any)}>
               <option value="">All recoup states</option>

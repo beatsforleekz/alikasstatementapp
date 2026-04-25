@@ -130,6 +130,7 @@ export interface StatementDraft {
     carry_forward_amount: number
     is_payable: boolean
     is_recouping: boolean
+    hold_payment_flag: boolean
     balance_model: 'approach_b'
     calculation_status: 'calculated'
     last_calculated_at: string
@@ -864,6 +865,7 @@ export function generateStatementRunData({
         carry_forward_amount: calc.carry_forward_amount,
         is_payable: calc.is_payable,
         is_recouping: calc.is_recouping,
+        hold_payment_flag: Boolean(contract?.hold_payment_flag ?? false),
         balance_model: 'approach_b',
         calculation_status: 'calculated',
         last_calculated_at: new Date().toISOString(),
