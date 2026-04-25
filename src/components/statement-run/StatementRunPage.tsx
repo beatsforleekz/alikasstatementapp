@@ -2226,13 +2226,19 @@ export default function StatementRunPage() {
           defaultStatementCurrency
         )
         return (
-          <div className="grid grid-cols-7 gap-3">
+          <div className="grid grid-cols-8 gap-3">
             <StatCard label="Statements" value={records.length} sub={`${domain} · ${selectedPeriod?.label ?? '—'}`} />
             <StatCard label="Payable" value={payableCount} sub={payableSub} color="green" />
             <StatCard
+              label="Net Writer Income (Import)"
+              value={payableSub}
+              sub="writer net from current import only (excludes carry-forward)"
+              color="green"
+            />
+            <StatCard
               label="Net After Run"
               value={netAfterRunValue}
-              sub="writer net after allocation and deductions, including carry-forward"
+              sub="writer net after allocation, deductions and carry-forward"
               color="blue"
             />
             <StatCard

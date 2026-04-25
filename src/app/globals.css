@@ -292,8 +292,12 @@ html, body {
   }
 
   /* ---- Stat cards ---- */
-  .stat-card { @apply card p-4 flex flex-col gap-1; }
-  .stat-value { @apply text-2xl font-bold font-mono; }
+  .stat-card { @apply card p-4 flex flex-col gap-1 min-w-0; }
+  .stat-value {
+    @apply text-[1.2rem] font-semibold font-mono leading-snug;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
   .stat-label { @apply text-xs uppercase tracking-wider; color: var(--ops-muted); }
 
   /* ---- Page layout ---- */

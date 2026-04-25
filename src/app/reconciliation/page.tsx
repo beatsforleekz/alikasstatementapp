@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { AlertTriangle, CheckCircle, RefreshCw } from 'lucide-react'
+import { AlertTriangle, CheckCircle, Download, RefreshCw } from 'lucide-react'
 import { supabase } from '@/lib/supabase/client'
 import { Alert, DomainBadge, LoadingSpinner } from '@/components/ui'
 import { validateBalanceChain, formatCurrency } from '@/lib/utils/balanceEngine'
@@ -10,6 +10,7 @@ import type { StatementPeriod } from '@/lib/types'
 import { isPublishingContractType } from '@/lib/types'
 import { buildPublishingAllocationRoutes, type ContractRepertoireAllocationLink } from '@/lib/utils/publishingAllocation'
 import { sortByLabel } from '@/lib/utils/sortOptions'
+import { downloadCSV } from '@/lib/utils/outputGenerator'
 
 const IMPORT_ROW_FETCH_PAGE_SIZE = 1000
 const REFERENCE_FETCH_PAGE_SIZE = 1000
@@ -184,6 +185,13 @@ function formatAggregateAmount(
 function formatUnclassifiedAmount(amount: number, currencies: string[], fallbackCurrency: string) {
   const displayAmount = Math.round(amount * 100) === 0 ? 0 : amount
   return formatAggregateAmount(displayAmount, currencies, fallbackCurrency)
+}
+
+function escapeCsv(value: string | number | boolean | null | undefined) {
+  if (value === null || value === undefined) return ''
+  const text = String(value)
+  if (/[",\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`
+  return text
 }
 
 function deriveRowStatus(record: ReconRecord, prior: ReconRecord | undefined): RowStatusMeta {
@@ -540,11 +548,31 @@ export default function ReconciliationPage() {
       return Number(b.record.payable_amount ?? 0) - Number(a.record.payable_amount ?? 0)
     })
 
-  const currentPayable = records.filter(record => record.is_payable).reduce((sum, record) => sum + Number(record.payable_amount ?? 0), 0)
-  const priorPayable = compareRecords.filter(record => record.is_payable).reduce((sum, record) => sum + Number(record.payable_amount ?? 0), 0)
-  const payableDelta = currentPayable - priorPayable
-  const currentPayableValue = formatAggregateAmount(
-    currentPayable,
+  const currentPayableOnly = records.filter(record => record.is_payable).reduce((sum, record) => sum + Number(record.payable_amount ?? 0), 0)
+  const currentCarryForward = records.reduce((sum, record) => sum + Number(record.carry_forward_amount ?? 0), 0)
+  const currentWriterNetAfterRun = records.reduce(
+    (sum, record) => sum + Number(record.payable_amount ?? 0) + Number(record.carry_forward_amount ?? 0),
+    0
+  )
+  const priorPayable = compareRecords.reduce(
+    (sum, record) => sum + Number(record.payable_amount ?? 0) + Number(record.carry_forward_amount ?? 0),
+    0
+  )
+  const payableDelta = currentWriterNetAfterRun - priorPayable
+  const currentCarryForwardValue = formatAggregateAmount(
+    currentCarryForward,
+    records
+      .filter(record => Number(record.carry_forward_amount ?? 0) !== 0)
+      .map(record => record.statement_currency ?? record.payee?.currency ?? defaultCurrencyForDomain(domainFilter)),
+    defaultCurrencyForDomain(domainFilter)
+  )
+  const currentWriterNetAfterRunValue = formatAggregateAmount(
+    currentWriterNetAfterRun,
+    records.map(record => record.statement_currency ?? record.payee?.currency ?? defaultCurrencyForDomain(domainFilter)),
+    defaultCurrencyForDomain(domainFilter)
+  )
+  const currentPayableOnlyValue = formatAggregateAmount(
+    currentPayableOnly,
     records.filter(record => record.is_payable).map(record => record.statement_currency ?? record.payee?.currency ?? defaultCurrencyForDomain(domainFilter)),
     defaultCurrencyForDomain(domainFilter)
   )
@@ -567,6 +595,47 @@ export default function ReconciliationPage() {
     defaultCurrencyForDomain(domainFilter)
   )
 
+  const exportStatementTotalsCsv = () => {
+    const rows = [
+      [
+        'Payee',
+        'Contract',
+        'Period',
+        'Domain',
+        'Currency',
+        'Current Period Earnings',
+        'Deductions',
+        'Carryover In',
+        'Final Balance',
+        'Payable Amount',
+        'Carry Forward',
+        'Approval Status',
+        'Hold Flag',
+        'Manual Override Flag',
+      ],
+      ...records.map(record => [
+        record.payee?.payee_name ?? '',
+        record.contract?.contract_name ?? record.contract?.contract_code ?? '',
+        record.statement_period?.label ?? selectedPeriod?.label ?? '',
+        record.domain ?? domainFilter ?? '',
+        record.statement_currency ?? record.payee?.currency ?? defaultCurrencyForDomain(domainFilter),
+        Number(record.current_earnings ?? 0),
+        Number(record.deductions ?? 0),
+        Number(record.prior_period_carryover_applied ?? 0),
+        Number(record.final_balance_after_carryover ?? 0),
+        Number(record.payable_amount ?? 0),
+        Number(record.carry_forward_amount ?? 0),
+        record.approval_status ?? '',
+        record.hold_payment_flag ? 'true' : 'false',
+        record.manual_override_flag ? 'true' : 'false',
+      ]),
+    ]
+    const csv = rows.map(row => row.map(escapeCsv).join(',')).join('\n')
+    const domainLabel = domainFilter || 'all'
+    const periodLabel = (selectedPeriod?.label ?? 'period').replace(/[^a-zA-Z0-9_.-]+/g, '_')
+    downloadCSV(csv, `statement_totals_${domainLabel}_${periodLabel}.csv`)
+  }
+
   return (
     <div className="space-y-5">
       <div className="page-header">
@@ -574,9 +643,14 @@ export default function ReconciliationPage() {
           <h1 className="page-title">Reconciliation</h1>
           <p className="page-subtitle">Check that imports, statements, exclusions, and balances tie out cleanly</p>
         </div>
-        <button onClick={() => { void loadPageData() }} className="btn-ghost btn-sm" disabled={refreshing || !selectedPeriodId}>
-          <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={exportStatementTotalsCsv} className="btn-secondary btn-sm" disabled={records.length === 0}>
+            <Download size={13} /> Export Statement Totals CSV
+          </button>
+          <button onClick={() => { void loadPageData() }} className="btn-ghost btn-sm" disabled={refreshing || !selectedPeriodId}>
+            <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
+          </button>
+        </div>
       </div>
 
       {error && <Alert type="error">{error}</Alert>}
@@ -642,23 +716,32 @@ export default function ReconciliationPage() {
         <div className="flex justify-center py-16"><LoadingSpinner size={22} /></div>
       ) : (
         <>
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-3">
+          <div
+            className="flex flex-wrap"
+            style={{ gap: 16, alignItems: 'stretch' }}
+          >
             <ReconStatCard
               label="Import Total"
               value={formatAggregateAmount(currentSummary.importTotal.total, currentSummary.importTotal.currencies, defaultCurrencyForDomain(domainFilter))}
               sub={`${importRows.length.toLocaleString()} import row(s) in this scope`}
             />
             <ReconStatCard
-              label="Gross In Scope"
-              value={formatAggregateAmount(currentSummary.grossInScope.total, currentSummary.grossInScope.currencies, defaultCurrencyForDomain(domainFilter))}
-              sub="Matched and in live statement scope"
-              accent="cyan"
+              label="Statement Coverage"
+              value={formatAggregateAmount(currentSummary.onStatements.total, currentSummary.onStatements.currencies, defaultCurrencyForDomain(domainFilter))}
+              sub={`${statementedRowIds.length.toLocaleString()} import row(s) covered by generated statement lines`}
+              accent="green"
             />
             <ReconStatCard
-              label="On Statements"
-              value={formatAggregateAmount(currentSummary.onStatements.total, currentSummary.onStatements.currencies, defaultCurrencyForDomain(domainFilter))}
-              sub={`${statementedRowIds.length.toLocaleString()} import row(s) written to statements`}
+              label="Currently Payable"
+              value={currentWriterNetAfterRunValue}
+              sub="Statement records: payable + carry-forward"
               accent="green"
+            />
+            <ReconStatCard
+              label="Carry Forward"
+              value={currentCarryForwardValue}
+              sub="Statement records carried into the next period"
+              accent={currentCarryForward !== 0 ? 'amber' : 'default'}
             />
             <ReconStatCard
               label="Unmatched / Errors"
@@ -688,13 +771,21 @@ export default function ReconciliationPage() {
             />
           </div>
 
+          <div className="card border border-blue-200 bg-blue-50/50">
+            <div className="card-body space-y-1 text-xs text-ops-muted">
+              <div><span className="font-semibold text-ops-text">Statement Coverage</span> is source/import amount covered by generated statement lines.</div>
+              <div><span className="font-semibold text-ops-text">Currently Payable</span> is statement-side writer net from statement records, including carry-forward, and should match Statement Run “Net After Run”.</div>
+              <div><span className="font-semibold text-ops-text">Carry Forward</span> remains broken out separately so current statement position is easier to audit.</div>
+            </div>
+          </div>
+
           <div className={`card border ${currentSummary.difference.total === 0 ? 'border-green-200 bg-green-50/60' : 'border-amber-200 bg-amber-50/70'}`}>
             <div className="card-header">
               <span className="text-sm font-semibold">Reconciliation Rule</span>
             </div>
             <div className="card-body space-y-2 text-sm">
               <div className="text-ops-text">
-                Import Total = On Statements + Unmatched / Errors + Excluded + Rounding Carry / Micro Ledger + Unclassified Difference
+                Import Total = Statement Coverage + Unmatched / Errors + Excluded + Rounding Carry / Micro Ledger + Unclassified Difference
               </div>
               <div className="text-xs text-ops-muted">
                 {formatAggregateAmount(currentSummary.importTotal.total, currentSummary.importTotal.currencies, defaultCurrencyForDomain(domainFilter))}
@@ -716,15 +807,16 @@ export default function ReconciliationPage() {
           {comparePeriodId && (
             <div className="card">
               <div className="card-header">
-                <span className="text-sm font-semibold">
-                  Statement Movement: {selectedPeriod?.label} vs {comparePeriod?.label}
-                </span>
-              </div>
-              <div className="card-body">
+              <span className="text-sm font-semibold">
+                Statement Movement: {selectedPeriod?.label} vs {comparePeriod?.label}
+              </span>
+            </div>
+            <div className="card-body">
                 <div className="grid grid-cols-3 gap-4">
                   <div className="text-center">
                     <div className="text-xs text-ops-muted mb-1">Current payable</div>
-                    <div className="text-xl font-bold font-mono text-green-400">{currentPayableValue}</div>
+                    <div className="text-[10px] text-ops-subtle mb-1">payable + carry-forward</div>
+                    <div className="text-xl font-bold font-mono text-green-400">{currentWriterNetAfterRunValue}</div>
                   </div>
                   <div className="text-center">
                     <div className="text-xs text-ops-muted mb-1">Prior payable</div>
@@ -1113,26 +1205,31 @@ function buildReconciliationData({
     let classified = false
     let state = 'Unclassified'
     let reason = 'Row did not match any visible reconciliation bucket.'
+    const isStatemented = statementedRowIdSet.has(row.id)
+    const isExcluded = !!row.excluded_flag
+    const isUnresolved = isLiveUnresolvedRow(row, contracts, payeeLinks, splits, links)
+    const isRoundingCarry = roundingRowIds.has(row.id)
+    const isInLiveStatementScope = isPublishingStatementEligibleRow(row, linkedRepertoireIds)
 
-    if (row.excluded_flag) {
+    if (isExcluded) {
       coverage.excluded += amount
       pushAmount(totals.excluded, amount, currency)
       classified = true
-    } else if (isLiveUnresolvedRow(row, contracts, payeeLinks, splits, links)) {
+    } else if (isUnresolved) {
       coverage.unmatchedOrError += amount
       pushAmount(totals.unmatchedOrError, amount, currency)
       classified = true
-    } else if (roundingRowIds.has(row.id)) {
+    } else if (isRoundingCarry) {
       coverage.roundingAdjustment += amount
       classified = true
-    } else if (isPublishingStatementEligibleRow(row, linkedRepertoireIds)) {
+    } else if (isInLiveStatementScope) {
       coverage.grossInScope += amount
       pushAmount(totals.grossInScope, amount, currency)
       state = 'In scope but not written'
       reason = 'Row is matched and has a live setup path, but it is not on statement lines, Sales Errors, Excluded, or Rounding Carry.'
     }
 
-    if (statementedRowIdSet.has(row.id)) {
+    if (isStatemented && isInLiveStatementScope && !isExcluded && !isUnresolved && !isRoundingCarry) {
       coverage.onStatements += amount
       pushAmount(totals.onStatements, amount, currency)
       classified = true
@@ -1191,11 +1288,20 @@ function ReconStatCard({
           : 'border-ops-border bg-white'
 
   return (
-    <div className={`card border ${tone}`}>
-      <div className="card-body space-y-1">
+    <div
+      className={`card border ${tone}`}
+      style={{
+        flex: '0 0 220px',
+        maxWidth: 220,
+        minHeight: 130,
+      }}
+    >
+      <div className="card-body space-y-1.5">
         <div className="text-[11px] uppercase tracking-wide text-ops-muted">{label}</div>
-        <div className="text-lg font-semibold font-mono text-ops-text">{value}</div>
-        {sub && <div className="text-[11px] text-ops-muted">{sub}</div>}
+        <div className="text-[1rem] font-semibold font-mono leading-snug tracking-[-0.01em] text-ops-text break-words">
+          {value}
+        </div>
+        {sub && <div className="text-[11px] leading-relaxed text-ops-muted">{sub}</div>}
       </div>
     </div>
   )
