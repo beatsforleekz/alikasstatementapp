@@ -10,7 +10,8 @@ import {
   checkReadyToIssue, validateBalanceChain, formatCurrency, calculateStatementRecord
 } from '@/lib/utils/balanceEngine'
 import {
-  generateCSV, downloadCSV, downloadExcel, openPrintableHTML
+  generateCSV, downloadCSV, downloadExcel, openPrintableHTML,
+  type PublishingPackageOutputData,
 } from '@/lib/utils/outputGenerator'
 import {
   activeStatementBuckets,
@@ -25,6 +26,10 @@ import {
   STATEMENT_BUCKETS,
   type StatementIncomeBucket,
 } from '@/lib/utils/statementPresentation'
+import {
+  assemblePublishingPackages,
+  type PublishingPackageRecord,
+} from '@/lib/utils/publishingPackagePreview'
 import { LOGO_BASE64 } from '@/lib/constants/statementBrand'
 import {
   ChevronLeft, Download, Printer, CheckCircle, XCircle, AlertTriangle,
@@ -933,26 +938,91 @@ export default function StatementDetailPage() {
     await load()
   }
 
-  function handleDownloadCSV() {
+  async function buildClientOutputData(): Promise<ReturnType<typeof buildOutputData> | PublishingPackageOutputData> {
+    if (!record || record.domain !== 'publishing') return buildOutputData()
+
+    const siblingRecords = await fetchAllPaged<PublishingPackageRecord>((from, to) =>
+      supabase
+        .from('statement_records')
+        .select(`
+          *,
+          payee:payees(id, payee_name, display_name, performer_name, statement_name, currency),
+          contract:contracts(id, contract_name, contract_code, contract_type),
+          statement_period:statement_periods(id, label, period_start, period_end, year, half)
+        `)
+        .eq('domain', 'publishing')
+        .eq('payee_id', record.payee_id)
+        .eq('statement_period_id', record.statement_period_id)
+        .order('contract_id')
+        .range(from, to)
+    )
+
+    const siblingIds = siblingRecords.map(sibling => sibling.id)
+    const siblingLines = siblingIds.length === 0
+      ? []
+      : await fetchAllPaged<StatementLineSummary>((from, to) =>
+        supabase
+          .from('statement_line_summaries')
+          .select('*')
+          .in('statement_record_id', siblingIds)
+          .order('statement_record_id')
+          .order('line_category')
+          .range(from, to)
+      )
+
+    const lineMap = new Map<string, StatementLineSummary[]>()
+    for (const line of siblingLines) {
+      const existing = lineMap.get(line.statement_record_id) ?? []
+      existing.push(line)
+      lineMap.set(line.statement_record_id, existing)
+    }
+
+    const pkg = assemblePublishingPackages(siblingRecords, lineMap)[0]
+    if (!pkg) return buildOutputData()
+
+    return {
+      payee_name: record.payee?.payee_name ?? '',
+      statement_name: pkg.payeeDisplayName || resolvePayeeDisplayName(record.payee),
+      performer_name: pkg.performerName,
+      period_label: record.statement_period?.label ?? '',
+      period_start: record.statement_period?.period_start ?? '',
+      period_end: record.statement_period?.period_end ?? '',
+      currency: pkg.currency,
+      sections: pkg.sections.map(section => ({
+        record: section.record,
+        contract_name: section.record.contract?.contract_name ?? section.record.contract_id,
+        contract_code: section.record.contract?.contract_code ?? null,
+        currency: section.currency,
+        lines: section.lines,
+      })),
+    }
+  }
+
+  async function handleDownloadCSV() {
     if (!record) return
-    const data = buildOutputData()
+    const data = await buildClientOutputData()
     const csv = generateCSV(data)
-    const csvContractCode = record.contract?.contract_code ?? record.contract?.contract_name?.replace(/[^a-zA-Z0-9]/g,'_') ?? 'NOCONTRACT'
-    downloadCSV(csv, `${(resolvePayeeDisplayName(record.payee) || record.payee?.payee_name || 'stmt').replace(/[^a-zA-Z0-9]/g,'_')}_${csvContractCode}_${record.statement_period?.label}.csv`)
+    const suffix = record.domain === 'publishing'
+      ? 'publishing_statement'
+      : (record.contract?.contract_code ?? record.contract?.contract_name?.replace(/[^a-zA-Z0-9]/g,'_') ?? 'NOCONTRACT')
+    downloadCSV(csv, `${(resolvePayeeDisplayName(record.payee) || record.payee?.payee_name || 'stmt').replace(/[^a-zA-Z0-9]/g,'_')}_${suffix}_${record.statement_period?.label}.csv`)
     recordOutputGenerated('csv')
   }
 
   async function handleDownloadExcel() {
     if (!record) return
-    const xlContractCode = record.contract?.contract_code ?? record.contract?.contract_name?.replace(/[^a-zA-Z0-9]/g,'_') ?? 'NOCONTRACT'
-    await downloadExcel(buildOutputData(), `${(resolvePayeeDisplayName(record.payee) || record.payee?.payee_name || 'stmt').replace(/[^a-zA-Z0-9]/g,'_')}_${xlContractCode}_${record.statement_period?.label}.xlsx`)
+    const data = await buildClientOutputData()
+    const xlSuffix = record.domain === 'publishing'
+      ? 'publishing_statement'
+      : (record.contract?.contract_code ?? record.contract?.contract_name?.replace(/[^a-zA-Z0-9]/g,'_') ?? 'NOCONTRACT')
+    await downloadExcel(data, `${(resolvePayeeDisplayName(record.payee) || record.payee?.payee_name || 'stmt').replace(/[^a-zA-Z0-9]/g,'_')}_${xlSuffix}_${record.statement_period?.label}.xlsx`)
     recordOutputGenerated('excel')
   }
 
-  function handlePrint() {
+  async function handlePrint() {
     if (!record) return
     try {
-      const printWindow = openPrintableHTML(buildOutputData(), { autoPrint: true })
+      const printWindow = openPrintableHTML(await buildClientOutputData(), { autoPrint: true })
       if (!printWindow) {
         setError('Could not open the statement print view. Please allow pop-ups and try again.')
         return
@@ -965,22 +1035,6 @@ export default function StatementDetailPage() {
       return
     }
     recordOutputGenerated('html')
-  }
-
-  function handlePrintInternalReview() {
-    if (!record) return
-    try {
-      const printWindow = openPrintableHTML(buildOutputData(), { autoPrint: true, internalReview: true })
-      if (!printWindow) {
-        setError('Could not open the internal review print view. Please allow pop-ups and try again.')
-        return
-      }
-      setError(null)
-    } catch (e: any) {
-      setError(e?.message
-        ? `Could not open the internal review print view: ${e.message}`
-        : 'Could not open the internal review print view. Please try again.')
-    }
   }
 
   function buildOutputData() {
@@ -1181,10 +1235,9 @@ export default function StatementDetailPage() {
           </div>
         </div>
         <div className="flex gap-2">
-          <button onClick={handlePrint} className="btn-secondary btn-sm"><Printer size={13} /> Print Statement</button>
-          <button onClick={handlePrintInternalReview} className="btn-secondary btn-sm"><Printer size={13} /> Print Internal Review</button>
-          <button onClick={handleDownloadCSV} className="btn-secondary btn-sm"><Download size={13} /> CSV</button>
-          <button onClick={handleDownloadExcel} className="btn-secondary btn-sm"><Download size={13} /> Excel</button>
+          <button onClick={handlePrint} className="btn-secondary btn-sm"><Printer size={13} /> {record.domain === 'publishing' ? 'Print Consolidated Statement' : 'Print Statement'}</button>
+          <button onClick={handleDownloadCSV} className="btn-secondary btn-sm"><Download size={13} /> {record.domain === 'publishing' ? 'Consolidated CSV' : 'CSV'}</button>
+          <button onClick={handleDownloadExcel} className="btn-secondary btn-sm"><Download size={13} /> {record.domain === 'publishing' ? 'Consolidated Excel' : 'Excel'}</button>
         </div>
       </div>
 
@@ -1730,13 +1783,13 @@ export default function StatementDetailPage() {
               )}
               <div className="flex gap-2">
                 <button onClick={handleDownloadExcel} disabled={record.approval_status !== 'approved'} className="btn-secondary btn-sm flex-1">
-                  <Download size={12} /> Excel
+                  <Download size={12} /> {record.domain === 'publishing' ? 'Consolidated Excel' : 'Excel'}
                 </button>
                 <button onClick={handleDownloadCSV} disabled={record.approval_status !== 'approved'} className="btn-secondary btn-sm flex-1">
-                  <Download size={12} /> CSV
+                  <Download size={12} /> {record.domain === 'publishing' ? 'Consolidated CSV' : 'CSV'}
                 </button>
                 <button onClick={handlePrint} disabled={record.approval_status !== 'approved'} className="btn-secondary btn-sm flex-1">
-                  <Printer size={12} /> Print
+                  <Printer size={12} /> {record.domain === 'publishing' ? 'Print Consolidated' : 'Print'}
                 </button>
               </div>
               <div className="border-t border-ops-border pt-2">

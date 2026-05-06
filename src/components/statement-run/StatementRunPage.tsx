@@ -29,7 +29,7 @@ import {
   type StatementGenerationMicroAllocation,
   type StatementGenerationPreviousStatementCarryover,
 } from '@/lib/utils/statementGeneration'
-import type { StatementOutputData } from '@/lib/utils/outputGenerator'
+import type { PublishingPackageOutputData, StatementOutputData } from '@/lib/utils/outputGenerator'
 import { generateCSV, downloadCSV } from '@/lib/utils/outputGenerator'
 import { buildZipArchive } from '@/lib/utils/simpleZip'
 import {
@@ -38,6 +38,7 @@ import {
 } from '@/lib/utils/publishingAllocation'
 import { sortByLabel, sortOptionEntries } from '@/lib/utils/sortOptions'
 import { resolvePayeeDisplayName, resolvePayeePerformerName } from '@/lib/utils/statementPresentation'
+import { assemblePublishingPackages } from '@/lib/utils/publishingPackagePreview'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -1894,6 +1895,35 @@ export default function StatementRunPage() {
     lines: linesByRecord.get(record.id) ?? [],
   })
 
+  const buildPublishingPackageOutputData = (
+    packageRecords: RunRecord[],
+    linesByRecord: Map<string, any[]>
+  ): PublishingPackageOutputData | null => {
+    const lineMap = new Map<string, any[]>()
+    for (const packageRecord of packageRecords) {
+      lineMap.set(packageRecord.id, linesByRecord.get(packageRecord.id) ?? [])
+    }
+    const pkg = assemblePublishingPackages(packageRecords as any, lineMap as any)[0]
+    if (!pkg) return null
+
+    return {
+      payee_name: packageRecords[0]?.payee?.payee_name ?? packageRecords[0]?.payee_id ?? '',
+      statement_name: pkg.payeeDisplayName || resolvePayeeDisplayName(packageRecords[0]?.payee as any) || packageRecords[0]?.payee_id,
+      performer_name: pkg.performerName,
+      period_label: packageRecords[0]?.statement_period?.label ?? selectedPeriod?.label ?? 'Statement',
+      period_start: '',
+      period_end: '',
+      currency: pkg.currency,
+      sections: pkg.sections.map(section => ({
+        record: section.record as any,
+        contract_name: section.record.contract?.contract_name ?? section.record.contract_id,
+        contract_code: section.record.contract?.contract_code ?? null,
+        currency: section.currency,
+        lines: section.lines,
+      })),
+    }
+  }
+
   const downloadSelectedStatementsCsvZip = async () => {
     const selected = visibleRecords.filter(record => selectedRecordIds.has(record.id))
     if (selected.length === 0) return
@@ -1903,16 +1933,33 @@ export default function StatementRunPage() {
       const recordIds = selected.map(record => record.id)
       const linesByRecord = await fetchStatementLinesByRecord(recordIds)
       const encoder = new TextEncoder()
-      const files = selected.map(record => {
-        const payeeName = (resolvePayeeDisplayName(record.payee as any) || record.payee_id).replace(/[^a-zA-Z0-9]+/g, '_')
-        const contractName = (record.contract?.contract_code ?? record.contract?.contract_name ?? record.contract_id).replace(/[^a-zA-Z0-9]+/g, '_')
-        const periodLabel = (record.statement_period?.label ?? selectedPeriod?.label ?? 'statement').replace(/[^a-zA-Z0-9]+/g, '_')
-        const output = buildStatementOutputData(record, linesByRecord)
-        return {
-          name: `${payeeName}__${contractName}__${periodLabel}.csv`,
-          data: encoder.encode(generateCSV(output)),
-        }
-      })
+      const files = domain === 'publishing'
+        ? Array.from(selected.reduce((groups, record) => {
+            const key = `${record.payee_id}::${record.statement_period?.label ?? selectedPeriod?.label ?? ''}`
+            const existing = groups.get(key) ?? []
+            existing.push(record)
+            groups.set(key, existing)
+            return groups
+          }, new Map<string, RunRecord[]>()).values()).flatMap(group => {
+            const output = buildPublishingPackageOutputData(group, linesByRecord)
+            if (!output) return []
+            const payeeName = (output.statement_name || output.payee_name || 'stmt').replace(/[^a-zA-Z0-9]+/g, '_')
+            const periodLabel = (output.period_label || 'statement').replace(/[^a-zA-Z0-9]+/g, '_')
+            return [{
+              name: `${payeeName}__publishing_statement__${periodLabel}.csv`,
+              data: encoder.encode(generateCSV(output)),
+            }]
+          })
+        : selected.map(record => {
+            const payeeName = (resolvePayeeDisplayName(record.payee as any) || record.payee_id).replace(/[^a-zA-Z0-9]+/g, '_')
+            const contractName = (record.contract?.contract_code ?? record.contract?.contract_name ?? record.contract_id).replace(/[^a-zA-Z0-9]+/g, '_')
+            const periodLabel = (record.statement_period?.label ?? selectedPeriod?.label ?? 'statement').replace(/[^a-zA-Z0-9]+/g, '_')
+            const output = buildStatementOutputData(record, linesByRecord)
+            return {
+              name: `${payeeName}__${contractName}__${periodLabel}.csv`,
+              data: encoder.encode(generateCSV(output)),
+            }
+          })
       const zipBlob = buildZipArchive(files)
       const url = URL.createObjectURL(zipBlob)
       const link = document.createElement('a')
@@ -2610,7 +2657,9 @@ export default function StatementRunPage() {
                 </span>
                 <button className="btn-ghost btn-sm" onClick={() => setSelectedRecordIds(new Set())}>Clear</button>
                 <button className="btn-secondary btn-sm" onClick={() => { void downloadSelectedStatementsCsvZip() }} disabled={saving === '__bulk_csv_zip__'}>
-                  {saving === '__bulk_csv_zip__' ? <LoadingSpinner size={11} /> : <><Download size={12} /> Download Selected CSVs (ZIP)</>}
+                  {saving === '__bulk_csv_zip__'
+                    ? <LoadingSpinner size={11} />
+                    : <><Download size={12} /> {domain === 'publishing' ? 'Download Consolidated CSVs (ZIP)' : 'Download Selected CSVs (ZIP)'}</>}
                 </button>
                 <button className="btn-ghost btn-sm" style={{ color: 'var(--accent-red)' }} onClick={deleteSelectedRecords} disabled={saving === '__bulk_delete__'}>
                   {saving === '__bulk_delete__' ? <LoadingSpinner size={11} /> : 'Delete selected'}

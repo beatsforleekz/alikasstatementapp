@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabase/client'
 import { Alert, LoadingSpinner, EmptyState } from '@/components/ui'
 import { Users, Plus, Mail, AlertTriangle, Search, RefreshCw, Edit, Trash2 } from 'lucide-react'
@@ -30,6 +30,7 @@ function resolveDisplayName(payee: Pick<Payee, 'display_name' | 'statement_name'
 
 export default function PayeesPage() {
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [payees, setPayees] = useState<PayeeWithLinks[]>([])
   const [search, setSearch] = useState('')
   const [domainFilter, setDomainFilter] = useState('')
@@ -39,11 +40,17 @@ export default function PayeesPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [showForm, setShowForm] = useState(false)
   const [editingPayee, setEditingPayee] = useState<Payee | null>(null)
+  const restoreScrollRef = useRef<number | null>(null)
 
   useEffect(() => { load() }, [])
 
-  async function load() {
-    setLoading(true)
+  async function load(options?: { preserveScroll?: boolean }) {
+    const preserveScroll = Boolean(options?.preserveScroll)
+    if (preserveScroll && typeof window !== 'undefined') {
+      restoreScrollRef.current = window.scrollY
+    }
+    if (loading) setLoading(true)
+    else setRefreshing(true)
     try {
       const { data, error } = await supabase
         .from('payees')
@@ -54,7 +61,15 @@ export default function PayeesPage() {
     } catch (e: any) {
       setError(e.message)
     } finally {
+      if (preserveScroll && typeof window !== 'undefined' && restoreScrollRef.current != null) {
+        const targetScroll = restoreScrollRef.current
+        window.requestAnimationFrame(() => {
+          window.scrollTo({ top: targetScroll })
+          restoreScrollRef.current = null
+        })
+      }
       setLoading(false)
+      setRefreshing(false)
     }
   }
 
@@ -85,7 +100,7 @@ export default function PayeesPage() {
     await supabase.from('payee_aliases').delete().eq('payee_id', payee.id)
     const { error: deleteErr } = await supabase.from('payees').delete().eq('id', payee.id)
     if (deleteErr) setDeleteError(deleteErr.message)
-    else await load()
+    else await load({ preserveScroll: true })
     setDeletingId(null)
   }
 
@@ -148,7 +163,9 @@ export default function PayeesPage() {
           <option value="inactive">Inactive</option>
           <option value="">All</option>
         </select>
-        <button onClick={load} className="btn-ghost btn-sm"><RefreshCw size={13} /></button>
+        <button onClick={() => { void load({ preserveScroll: true }) }} className="btn-ghost btn-sm" disabled={refreshing}>
+          <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
+        </button>
       </div>
 
       {/* Missing email warning */}
@@ -179,7 +196,13 @@ export default function PayeesPage() {
         ) : filtered.length === 0 ? (
           <EmptyState title="No payees found" icon={Users} description="Add payees to get started" />
         ) : (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto relative">
+            {refreshing && (
+              <div className="absolute top-2 right-2 z-10 rounded bg-ops-surface-2 border border-ops-border px-2 py-1 text-[11px] text-ops-muted flex items-center gap-1.5">
+                <LoadingSpinner size={11} />
+                Refreshing…
+              </div>
+            )}
             <table className="ops-table">
               <thead>
                 <tr>
@@ -284,7 +307,11 @@ export default function PayeesPage() {
           payee={editingPayee}
           existingPayees={payees}
           onClose={() => { setShowForm(false); setEditingPayee(null) }}
-          onSaved={() => { setShowForm(false); setEditingPayee(null); load() }}
+          onSaved={async () => {
+            setShowForm(false)
+            setEditingPayee(null)
+            await load({ preserveScroll: true })
+          }}
         />
       )}
     </div>
