@@ -7,6 +7,7 @@ import {
   ApprovalBadge, PayableBadge, Amount, EmptyState,
 } from '@/components/ui'
 import { validateBalanceChain, formatCurrency } from '@/lib/utils/balanceEngine'
+import { resolvePayeeDisplayName } from '@/lib/utils/statementPresentation'
 import {
   ArrowLeft, AlertTriangle, CheckCircle,
   Edit2, Plus, Trash2, RefreshCw, ExternalLink,
@@ -222,6 +223,8 @@ export default function PayeeDetailPage() {
     setError(null)
     const { error: err } = await supabase.from('payees').update({
       payee_name:           editForm.payee_name,
+      display_name:         editForm.display_name || null,
+      performer_name:       editForm.performer_name || null,
       statement_name:       editForm.statement_name || null,
       primary_contact_name: editForm.primary_contact_name || null,
       primary_email:        editForm.primary_email || null,
@@ -271,7 +274,7 @@ export default function PayeeDetailPage() {
   const totalCarry      = statements.filter(s => !s.is_payable && s.carry_forward_amount > 0).reduce((n, s) => n + s.carry_forward_amount, 0)
   const chainIssues     = statements.filter(s => !validateBalanceChain(s as any).valid)
 
-  const displayName = payee?.statement_name?.trim() || payee?.payee_name || ''
+  const displayName = resolvePayeeDisplayName(payee)
 
   if (loading) return (
     <div className="flex items-center gap-2 p-8" style={{ color: 'var(--ops-muted)' }}><LoadingSpinner /> Loading payee…</div>
@@ -314,12 +317,24 @@ export default function PayeeDetailPage() {
           <SectionHeader title="Edit Payee" />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
             <div>
-              <MLabel>Payee Name *</MLabel>
+              <MLabel>Payee Name * <span style={{ fontWeight: 400, color: 'var(--ops-muted)', fontSize: 11 }}>(legal / internal)</span></MLabel>
               <MInput value={editForm.payee_name ?? ''}
                 onChange={e => setEditForm(f => ({ ...f, payee_name: e.target.value }))} />
             </div>
             <div>
-              <MLabel>Statement Name <span style={{ fontWeight: 400, color: 'var(--ops-muted)', fontSize: 11 }}>(printed on outputs — falls back to Payee Name)</span></MLabel>
+              <MLabel>Display Name <span style={{ fontWeight: 400, color: 'var(--ops-muted)', fontSize: 11 }}>(preferred payee-facing name)</span></MLabel>
+              <MInput placeholder={editForm.payee_name ?? 'Defaults to Payee Name'}
+                value={editForm.display_name ?? ''}
+                onChange={e => setEditForm(f => ({ ...f, display_name: e.target.value }))} />
+            </div>
+            <div>
+              <MLabel>Performer Name <span style={{ fontWeight: 400, color: 'var(--ops-muted)', fontSize: 11 }}>(optional)</span></MLabel>
+              <MInput placeholder="Appears as a secondary line on statements"
+                value={editForm.performer_name ?? ''}
+                onChange={e => setEditForm(f => ({ ...f, performer_name: e.target.value }))} />
+            </div>
+            <div>
+              <MLabel>Statement Name <span style={{ fontWeight: 400, color: 'var(--ops-muted)', fontSize: 11 }}>(legacy fallback)</span></MLabel>
               <MInput placeholder={editForm.payee_name ?? 'Defaults to Payee Name'}
                 value={editForm.statement_name ?? ''}
                 onChange={e => setEditForm(f => ({ ...f, statement_name: e.target.value }))} />
@@ -384,10 +399,20 @@ export default function PayeeDetailPage() {
         <div className="card" style={{ padding: 16 }}>
           <SectionHeader title="Payee Details" />
           <div>
+            <FieldRow label="Display Name"
+              value={payee.display_name?.trim()
+                ? payee.display_name
+                : <span style={{ color: 'var(--ops-subtle)' }}>— (falls back to Statement Name / Payee Name)</span>}
+            />
+            <FieldRow label="Performer Name"
+              value={payee.performer_name?.trim()
+                ? payee.performer_name
+                : <span style={{ color: 'var(--ops-subtle)' }}>—</span>}
+            />
             <FieldRow label="Statement Name"
               value={payee.statement_name?.trim()
                 ? payee.statement_name
-                : <span style={{ color: 'var(--ops-subtle)' }}>— (uses Payee Name: {payee.payee_name})</span>}
+                : <span style={{ color: 'var(--ops-subtle)' }}>— (legacy fallback only)</span>}
             />
             <FieldRow label="Contact" value={payee.primary_contact_name ?? <span style={{ color: 'var(--ops-subtle)' }}>—</span>} />
             <FieldRow

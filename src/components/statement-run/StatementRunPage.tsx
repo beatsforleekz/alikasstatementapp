@@ -37,6 +37,7 @@ import {
   type ContractRepertoireAllocationLink,
 } from '@/lib/utils/publishingAllocation'
 import { sortByLabel, sortOptionEntries } from '@/lib/utils/sortOptions'
+import { resolvePayeeDisplayName, resolvePayeePerformerName } from '@/lib/utils/statementPresentation'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -70,7 +71,7 @@ interface RunRecord {
   output_generated_flag: boolean
   email_status: string
   sent_date?: string | null
-  payee?: { payee_name: string; primary_email: string | null; currency: string } | null
+  payee?: { payee_name: string; display_name?: string | null; performer_name?: string | null; statement_name?: string | null; primary_email: string | null; currency: string } | null
   contract?: { contract_name: string; contract_code: string | null } | null
   statement_period?: { label: string } | null
 }
@@ -1112,7 +1113,7 @@ export default function StatementRunPage() {
   const loadRecords = async () => {
     let q = supabase
       .from('statement_records')
-      .select('*, payee:payees(payee_name,primary_email,currency), contract:contracts(contract_name,contract_code), statement_period:statement_periods(label)')
+      .select('*, payee:payees(payee_name,display_name,performer_name,statement_name,primary_email,currency), contract:contracts(contract_name,contract_code), statement_period:statement_periods(label)')
       .eq('statement_period_id', selectedPeriodId)
       .eq('domain', domain)
       .order('is_payable', { ascending: false })
@@ -1463,7 +1464,7 @@ export default function StatementRunPage() {
       if (riskyExistingRecords.length > 0) {
         const preview = riskyExistingRecords
           .slice(0, 5)
-          .map(record => `${record.payee?.payee_name ?? record.payee_id} · ${record.contract?.contract_name ?? record.contract_id}`)
+          .map(record => `${resolvePayeeDisplayName(record.payee as any) || record.payee_id} · ${record.contract?.contract_name ?? record.contract_id}`)
           .join('\n')
         const summary = riskyExistingRecords.length > 5
           ? `${preview}\n…plus ${riskyExistingRecords.length - 5} more`
@@ -1775,8 +1776,8 @@ export default function StatementRunPage() {
     })
     .slice()
     .sort((a, b) => {
-      if (statementSort === 'az') return (a.payee?.payee_name ?? '').localeCompare(b.payee?.payee_name ?? '')
-      return (b.payee?.payee_name ?? '').localeCompare(a.payee?.payee_name ?? '')
+      if (statementSort === 'az') return resolvePayeeDisplayName(a.payee as any).localeCompare(resolvePayeeDisplayName(b.payee as any))
+      return resolvePayeeDisplayName(b.payee as any).localeCompare(resolvePayeeDisplayName(a.payee as any))
     })
   const allVisibleRecordsSelected = visibleRecords.length > 0 && visibleRecords.every(record => selectedRecordIds.has(record.id))
   const someRecordsSelected = selectedRecordIds.size > 0
@@ -1882,7 +1883,8 @@ export default function StatementRunPage() {
   const buildStatementOutputData = (record: RunRecord, linesByRecord: Map<string, any[]>): StatementOutputData => ({
     record: record as any,
     payee_name: record.payee?.payee_name ?? record.payee_id,
-    statement_name: record.payee?.payee_name ?? record.payee_id,
+    statement_name: resolvePayeeDisplayName(record.payee as any) || record.payee_id,
+    performer_name: resolvePayeePerformerName(record.payee as any),
     contract_name: record.contract?.contract_name ?? record.contract_id,
     contract_code: record.contract?.contract_code ?? null,
     period_label: record.statement_period?.label ?? selectedPeriod?.label ?? 'Statement',
@@ -1902,7 +1904,7 @@ export default function StatementRunPage() {
       const linesByRecord = await fetchStatementLinesByRecord(recordIds)
       const encoder = new TextEncoder()
       const files = selected.map(record => {
-        const payeeName = (record.payee?.payee_name ?? record.payee_id).replace(/[^a-zA-Z0-9]+/g, '_')
+        const payeeName = (resolvePayeeDisplayName(record.payee as any) || record.payee_id).replace(/[^a-zA-Z0-9]+/g, '_')
         const contractName = (record.contract?.contract_code ?? record.contract?.contract_name ?? record.contract_id).replace(/[^a-zA-Z0-9]+/g, '_')
         const periodLabel = (record.statement_period?.label ?? selectedPeriod?.label ?? 'statement').replace(/[^a-zA-Z0-9]+/g, '_')
         const output = buildStatementOutputData(record, linesByRecord)
@@ -1952,7 +1954,7 @@ export default function StatementRunPage() {
       return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
     }
     const rows = records.map(record => ([
-      record.payee?.payee_name ?? record.payee_id,
+      resolvePayeeDisplayName(record.payee as any) || record.payee_id,
       record.contract?.contract_name ?? record.contract?.contract_code ?? record.contract_id,
       record.statement_period?.label ?? selectedPeriod?.label ?? '',
       record.domain,
@@ -2645,7 +2647,7 @@ export default function StatementRunPage() {
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ops-text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {rec.payee?.payee_name ?? rec.payee_id}
+                        {resolvePayeeDisplayName(rec.payee as any) || rec.payee_id}
                       </div>
                       <div style={{ fontSize: 12, color: 'var(--ops-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {rec.contract?.contract_code ? `${rec.contract.contract_code} · ` : ''}

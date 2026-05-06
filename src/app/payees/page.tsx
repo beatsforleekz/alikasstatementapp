@@ -24,6 +24,10 @@ function normalizePayeeName(value: string | null | undefined) {
   return (value ?? '').trim().replace(/\s+/g, ' ').toLowerCase()
 }
 
+function resolveDisplayName(payee: Pick<Payee, 'display_name' | 'statement_name' | 'payee_name'>) {
+  return payee.display_name?.trim() || payee.statement_name?.trim() || payee.payee_name
+}
+
 export default function PayeesPage() {
   const [loading, setLoading] = useState(true)
   const [payees, setPayees] = useState<PayeeWithLinks[]>([])
@@ -93,6 +97,8 @@ export default function PayeesPage() {
     if (search) {
       const q = search.toLowerCase()
       if (!p.payee_name.toLowerCase().includes(q) &&
+        !(p.display_name?.toLowerCase().includes(q)) &&
+        !(p.performer_name?.toLowerCase().includes(q)) &&
         !(p.primary_email?.toLowerCase().includes(q)) &&
         !(p.vendor_reference?.toLowerCase().includes(q))) return false
     }
@@ -197,10 +203,14 @@ export default function PayeesPage() {
                     <tr key={p.id} className="group">
                       <td>
                         <Link href={`/payees/${p.id}`} className="font-medium text-xs hover:text-blue-400">
-                          {p.payee_name}
+                          {resolveDisplayName(p)}
                         </Link>
-                        {p.statement_name && p.statement_name !== p.payee_name && (
-                          <div className="text-[10px] text-ops-muted">Stmt: {p.statement_name}</div>
+                        <div className="text-[10px] text-ops-muted">Legal: {p.payee_name}</div>
+                        {p.performer_name?.trim() && (
+                          <div className="text-[10px] text-ops-subtle">Performer: {p.performer_name}</div>
+                        )}
+                        {p.statement_name && p.statement_name !== resolveDisplayName(p) && (
+                          <div className="text-[10px] text-ops-muted">Legacy stmt: {p.statement_name}</div>
                         )}
                         {p.primary_contact_name && (
                           <div className="text-[10px] text-ops-subtle">{p.primary_contact_name}</div>
@@ -293,6 +303,8 @@ function PayeeFormModal({
   const isEdit = !!payee
   const [form, setForm] = useState({
     payee_name:           payee?.payee_name           ?? '',
+    display_name:         payee?.display_name         ?? '',
+    performer_name:       payee?.performer_name       ?? '',
     statement_name:       payee?.statement_name       ?? '',
     primary_contact_name: payee?.primary_contact_name ?? '',
     primary_email:        payee?.primary_email        ?? '',
@@ -350,10 +362,16 @@ function PayeeFormModal({
               </Link>
             </div>
           )}
-          <FormField label="Payee Name *">
+          <FormField label="Payee Name * (legal / internal)">
             <input className="ops-input" value={form.payee_name} onChange={e => set('payee_name', e.target.value)} />
           </FormField>
-          <FormField label="Statement Name (if different)">
+          <FormField label="Display Name">
+            <input className="ops-input" value={form.display_name} onChange={e => set('display_name', e.target.value)} placeholder="Preferred payee-facing name" />
+          </FormField>
+          <FormField label="Performer Name">
+            <input className="ops-input" value={form.performer_name} onChange={e => set('performer_name', e.target.value)} placeholder="Optional performer / artist identity" />
+          </FormField>
+          <FormField label="Statement Name (legacy fallback)">
             <input className="ops-input" value={form.statement_name} onChange={e => set('statement_name', e.target.value)} placeholder="Appears on statement outputs" />
           </FormField>
           <div className="grid grid-cols-2 gap-3">

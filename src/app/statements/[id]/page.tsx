@@ -14,9 +14,13 @@ import {
 } from '@/lib/utils/outputGenerator'
 import {
   activeStatementBuckets,
-  buildStatementPivot,
+  buildIncomeTypeSections,
+  calculateStatementPresentationTotals,
   getStatementCurrency,
+  getLinePresentationValues,
   normalizeStatementBucket,
+  resolvePayeeDisplayName,
+  resolvePayeePerformerName,
   STATEMENT_BUCKET_LABELS,
   STATEMENT_BUCKETS,
   type StatementIncomeBucket,
@@ -451,6 +455,7 @@ function PivotedStatementTable({
   const earningLines = lines.filter(line => line.line_category !== 'cost')
   const costLines = lines.filter(line => line.line_category === 'cost')
   const costTotal = costLines.reduce((sum, line) => sum + Math.abs(line.deduction_amount ?? line.net_amount ?? 0), 0)
+  const presentationTotals = calculateStatementPresentationTotals(lines)
 
   if (lines.length === 0) {
     return (
@@ -468,16 +473,20 @@ function PivotedStatementTable({
       </div>
     )
   }
-
-  const rows: PivotRow[] = buildStatementPivot(earningLines)
-  const active = activeStatementBuckets(rows)
-  const grandTotal = rows.reduce((s, r) => s + r.total, 0)
-  const grossRows = buildInternalPivotRows(earningLines, line => line.gross_amount ?? 0)
+  const sections = buildIncomeTypeSections(lines)
+  const grossRows = buildInternalPivotRows(earningLines, line => (
+    getLinePresentationValues(line).grossBasis
+  ))
   const grossActive = activeStatementBuckets(grossRows)
   const grossGrandTotal = grossRows.reduce((sum, row) => sum + row.total, 0)
-  const internalRows = internalViewMode === 'gross' ? grossRows : rows
-  const internalActive = internalViewMode === 'gross' ? grossActive : active
-  const internalGrandTotal = internalViewMode === 'gross' ? grossGrandTotal : grandTotal
+  const netRows = buildInternalPivotRows(lines.filter(line => line.line_category !== 'cost'), line => (
+    getLinePresentationValues(line).net
+  ))
+  const netActive = activeStatementBuckets(netRows)
+  const netGrandTotal = netRows.reduce((sum, row) => sum + row.total, 0)
+  const internalRows = internalViewMode === 'gross' ? grossRows : netRows
+  const internalActive = internalViewMode === 'gross' ? grossActive : netActive
+  const internalGrandTotal = internalViewMode === 'gross' ? grossGrandTotal : netGrandTotal
 
   const fmt = (v: number) =>
     v === 0 ? '—' : formatCurrency(v, currency)
@@ -488,63 +497,43 @@ function PivotedStatementTable({
       <div className="card">
         <div className="card-header">
           <span className="text-sm font-semibold">Statement Lines</span>
-          <span className="text-xs text-ops-muted">{rows.length} song{rows.length !== 1 ? 's' : ''}</span>
+          <span className="text-xs text-ops-muted">{sections.length} income type section{sections.length !== 1 ? 's' : ''}</span>
         </div>
-        <div className="overflow-x-auto">
-          <table className="ops-table">
-            <thead>
-              <tr>
-                <th style={{ minWidth: 160 }}>Song Title</th>
-                {active.map(b => (
-                  <th key={b} className="text-right">{BUCKET_LABELS[b]}</th>
-                ))}
-                <th className="text-right">Song Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, i) => (
-                <tr key={i}>
-                  <td>
-                    <div className="text-xs font-medium">{row.title}</div>
-                    {row.identifier && (
-                      <div className="font-mono text-[10px] text-ops-subtle mt-0.5">{row.identifier}</div>
-                    )}
-                  </td>
-                  {active.map(b => (
-                    <td key={b} className="text-right">
-                      <span className={`font-mono text-xs tabular-nums ${
-                        (row.buckets[b] ?? 0) !== 0 ? 'text-ops-text' : 'text-ops-subtle'
-                      }`}>
-                        {fmt(row.buckets[b] ?? 0)}
-                      </span>
-                    </td>
+        <div className="card-body space-y-4">
+          {sections.map(section => (
+            <div key={section.bucket} className="overflow-x-auto">
+              <div className="text-xs font-semibold uppercase tracking-wider text-ops-muted mb-2">{section.label}</div>
+              <table className="ops-table">
+                <thead>
+                  <tr>
+                    <th style={{ minWidth: 180 }}>Title</th>
+                    <th>Identifier</th>
+                    <th className="text-right">Income Type %</th>
+                    <th className="text-right">Gross Amount</th>
+                    <th className="text-right">Net Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {section.rows.map((row, i) => (
+                    <tr key={`${section.bucket}-${i}`}>
+                      <td className="text-xs font-medium">{row.title}</td>
+                      <td className="font-mono text-xs text-ops-muted">{row.identifier ?? '—'}</td>
+                      <td className="text-right text-xs font-mono">{row.incomeTypePercent != null ? `${(row.incomeTypePercent * 100).toFixed(2)}%` : '—'}</td>
+                      <td className="text-right"><Amount value={row.grossBasis} currency={currency} size="small" /></td>
+                      <td className="text-right"><Amount value={row.net} currency={currency} size="small" /></td>
+                    </tr>
                   ))}
-                  <td className="text-right">
-                    <span className="font-mono text-xs tabular-nums font-semibold text-ops-text">
-                      {formatCurrency(row.total, currency)}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr style={{ borderTop: '2px solid var(--ops-border)' }}>
-                <td className="text-xs font-semibold text-ops-muted py-2">Total</td>
-                {active.map(b => (
-                  <td key={b} className="text-right py-2">
-                    <span className="font-mono text-xs tabular-nums font-semibold">
-                      {fmt(rows.reduce((s, r) => s + (r.buckets[b] ?? 0), 0))}
-                    </span>
-                  </td>
-                ))}
-                <td className="text-right py-2">
-                  <span className="font-mono text-xs tabular-nums font-bold text-ops-text">
-                    {formatCurrency(grandTotal, currency)}
-                  </span>
-                </td>
-              </tr>
-            </tfoot>
-          </table>
+                </tbody>
+                <tfoot>
+                  <tr style={{ borderTop: '2px solid var(--ops-border)' }}>
+                    <td colSpan={3} className="text-xs font-semibold text-ops-muted py-2">{section.label} Total</td>
+                    <td className="text-right py-2"><Amount value={section.grossBasisTotal} currency={currency} size="small" /></td>
+                    <td className="text-right py-2"><Amount value={section.netTotal} currency={currency} size="small" /></td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -552,7 +541,7 @@ function PivotedStatementTable({
         <div className="card-header">
           <div>
             <span className="text-sm font-semibold">Internal View</span>
-            <p className="text-xs text-ops-subtle mt-0.5">Gross shows pre-contract amounts only. Client outputs stay unchanged.</p>
+            <p className="text-xs text-ops-subtle mt-0.5">Gross shows true payee gross earnings before deductions. Source amounts stay in the detailed breakdown.</p>
           </div>
           <div style={{ display: 'flex', borderRadius: 6, overflow: 'hidden', border: '1px solid var(--ops-border)' }}>
             {([
@@ -702,8 +691,11 @@ function PivotedStatementTable({
                   <th>Channel/Retailer</th>
                   <th>Territory</th>
                   <th className="text-right">Qty</th>
-                  <th className="text-right">Gross Amount</th>
-                  <th className="text-right">Net Amount</th>
+                  <th className="text-right">Source Amount</th>
+                  <th className="text-right">Income Type %</th>
+                  <th className="text-right">Gross Earnings</th>
+                  <th className="text-right">Deduction</th>
+                  <th className="text-right">Net</th>
                 </tr>
               </thead>
               <tbody>
@@ -721,8 +713,11 @@ function PivotedStatementTable({
                     <td className="text-xs font-mono text-right">
                       {l.quantity != null ? l.quantity.toLocaleString('en-GB') : '—'}
                     </td>
-                    <td><Amount value={l.gross_amount ?? 0} currency={currency} size="small" /></td>
-                    <td><Amount value={l.net_amount ?? 0} currency={currency} size="small" /></td>
+                    <td><Amount value={l.pre_split_amount ?? l.gross_amount ?? 0} currency={currency} size="small" /></td>
+                    <td className="text-xs font-mono text-right">{l.rate_applied != null ? `${(l.rate_applied * 100).toFixed(2)}%` : '—'}</td>
+                    <td><Amount value={l.line_category === 'income' ? Math.max(l.net_amount ?? 0, 0) : 0} currency={currency} size="small" /></td>
+                    <td><Amount value={l.deduction_amount ?? 0} currency={currency} size="small" /></td>
+                    <td><Amount value={l.line_category === 'income' ? Math.max(l.net_amount ?? 0, 0) : -(l.deduction_amount ?? 0)} currency={currency} size="small" /></td>
                   </tr>
                 ))}
               </tbody>
@@ -730,10 +725,19 @@ function PivotedStatementTable({
                 <tr className="border-t-2 border-ops-border">
                   <td colSpan={6} className="text-xs font-semibold text-right pr-3 py-2">Total</td>
                   <td>
-                    <Amount value={lines.reduce((s, l) => s + (l.gross_amount ?? 0), 0)} currency={currency} size="small" />
+                    <Amount value={lines.reduce((s, l) => s + (l.pre_split_amount ?? l.gross_amount ?? 0), 0)} currency={currency} size="small" />
                   </td>
                   <td>
-                    <Amount value={lines.reduce((s, l) => s + (l.net_amount ?? 0), 0)} currency={currency} size="small" />
+                    <span className="text-xs font-mono text-right block">—</span>
+                  </td>
+                  <td>
+                    <Amount value={presentationTotals.grossEarnings} currency={currency} size="small" />
+                  </td>
+                  <td>
+                    <Amount value={presentationTotals.deductions} currency={currency} size="small" />
+                  </td>
+                  <td>
+                    <Amount value={presentationTotals.netEarnings} currency={currency} size="small" />
                   </td>
                 </tr>
               </tfoot>
@@ -906,7 +910,7 @@ export default function StatementDetailPage() {
     const existingOfType = outputs.filter(o => o.output_type === outputType)
     const nextVersion = existingOfType.length + 1
     const ext: Record<string, string> = { excel: 'xlsx', csv: 'csv', html: 'html' }
-    const payeeName    = record?.payee?.payee_name?.replace(/[^a-zA-Z0-9]/g, '_') ?? 'stmt'
+    const payeeName    = (resolvePayeeDisplayName(record?.payee) || record?.payee?.payee_name || 'stmt').replace(/[^a-zA-Z0-9]/g, '_')
     const contractCode = (record?.contract?.contract_code ?? record?.contract?.contract_name?.replace(/[^a-zA-Z0-9]/g,'_') ?? 'NOCONTRACT')
     const period = record?.statement_period?.label ?? ''
 
@@ -934,14 +938,14 @@ export default function StatementDetailPage() {
     const data = buildOutputData()
     const csv = generateCSV(data)
     const csvContractCode = record.contract?.contract_code ?? record.contract?.contract_name?.replace(/[^a-zA-Z0-9]/g,'_') ?? 'NOCONTRACT'
-    downloadCSV(csv, `${record.payee?.payee_name?.replace(/[^a-zA-Z0-9]/g,'_')}_${csvContractCode}_${record.statement_period?.label}.csv`)
+    downloadCSV(csv, `${(resolvePayeeDisplayName(record.payee) || record.payee?.payee_name || 'stmt').replace(/[^a-zA-Z0-9]/g,'_')}_${csvContractCode}_${record.statement_period?.label}.csv`)
     recordOutputGenerated('csv')
   }
 
   async function handleDownloadExcel() {
     if (!record) return
     const xlContractCode = record.contract?.contract_code ?? record.contract?.contract_name?.replace(/[^a-zA-Z0-9]/g,'_') ?? 'NOCONTRACT'
-    await downloadExcel(buildOutputData(), `${record.payee?.payee_name?.replace(/[^a-zA-Z0-9]/g,'_')}_${xlContractCode}_${record.statement_period?.label}.xlsx`)
+    await downloadExcel(buildOutputData(), `${(resolvePayeeDisplayName(record.payee) || record.payee?.payee_name || 'stmt').replace(/[^a-zA-Z0-9]/g,'_')}_${xlContractCode}_${record.statement_period?.label}.xlsx`)
     recordOutputGenerated('excel')
   }
 
@@ -963,11 +967,28 @@ export default function StatementDetailPage() {
     recordOutputGenerated('html')
   }
 
+  function handlePrintInternalReview() {
+    if (!record) return
+    try {
+      const printWindow = openPrintableHTML(buildOutputData(), { autoPrint: true, internalReview: true })
+      if (!printWindow) {
+        setError('Could not open the internal review print view. Please allow pop-ups and try again.')
+        return
+      }
+      setError(null)
+    } catch (e: any) {
+      setError(e?.message
+        ? `Could not open the internal review print view: ${e.message}`
+        : 'Could not open the internal review print view. Please try again.')
+    }
+  }
+
   function buildOutputData() {
   return {
     record,
     payee_name:     record.payee?.payee_name ?? '',
-    statement_name: record.payee?.statement_name ?? record.payee?.payee_name ?? '',
+    statement_name: resolvePayeeDisplayName(record.payee),
+    performer_name: resolvePayeePerformerName(record.payee),
     contract_name:  record.contract?.contract_name ?? '',
     contract_code:  record.contract?.contract_code ?? null,
     period_label:   record.statement_period?.label ?? '',
@@ -1102,6 +1123,9 @@ export default function StatementDetailPage() {
   const payee    = record.payee
   const period   = record.statement_period
   const contract = record.contract
+  const payeeDisplayName = resolvePayeeDisplayName(payee)
+  const performerName = resolvePayeePerformerName(payee)
+  const presentationTotals = calculateStatementPresentationTotals(lines)
 
   // FIX: use statement_currency locked at generation time, fall back to payee currency
   const currency = getStatementCurrency(record)
@@ -1133,7 +1157,7 @@ export default function StatementDetailPage() {
           <div className="flex items-center gap-2 flex-wrap">
             <div>
               <div className="flex items-center gap-2 flex-wrap">
-                <h1 className="page-title">{payee?.payee_name}</h1>
+                <h1 className="page-title">{payeeDisplayName}</h1>
                 <DomainBadge domain={record.domain} />
                 <PayableBadge record={record} />
                 <ApprovalBadge status={record.approval_status} />
@@ -1150,11 +1174,15 @@ export default function StatementDetailPage() {
                   ? <> · {payee.primary_email}</>
                   : <> · <span className="text-red-400">No email address</span></>}
               </p>
+              {performerName && (
+                <p className="text-xs text-ops-muted mt-1">Performer: {performerName}</p>
+              )}
             </div>
           </div>
         </div>
         <div className="flex gap-2">
-          <button onClick={handlePrint} className="btn-secondary btn-sm"><Printer size={13} /> Print</button>
+          <button onClick={handlePrint} className="btn-secondary btn-sm"><Printer size={13} /> Print Statement</button>
+          <button onClick={handlePrintInternalReview} className="btn-secondary btn-sm"><Printer size={13} /> Print Internal Review</button>
           <button onClick={handleDownloadCSV} className="btn-secondary btn-sm"><Download size={13} /> CSV</button>
           <button onClick={handleDownloadExcel} className="btn-secondary btn-sm"><Download size={13} /> Excel</button>
         </div>
@@ -1196,6 +1224,11 @@ export default function StatementDetailPage() {
               <BalanceLine label="Opening Balance B/F" value={record.opening_balance} currency={currency} />
               <BalanceLine label="Current Period Income" value={record.current_earnings} currency={currency} />
               <BalanceLine label="Deductions" value={-record.deductions} currency={currency} />
+              <div className="border-t border-ops-border pt-1 mt-1">
+                <BalanceLine label="Gross Earnings" value={presentationTotals.grossEarnings} currency={currency} />
+                <BalanceLine label="Presentation Deductions" value={-presentationTotals.deductions} currency={currency} />
+                <BalanceLine label="Net Earnings" value={presentationTotals.netEarnings} currency={currency} bold />
+              </div>
 
               <div className="border-t border-ops-border pt-1 mt-1">
                 <BalanceLine label="Closing Balance (pre-carryover)" value={record.closing_balance_pre_carryover} currency={currency} bold />
@@ -1268,6 +1301,9 @@ export default function StatementDetailPage() {
                 </p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 12, fontFamily: 'monospace' }}>
                   {[
+                    ['Gross Earnings',                   presentationTotals.grossEarnings,         'var(--ops-text)'],
+                    ['Deductions',                       -presentationTotals.deductions,           presentationTotals.deductions > 0 ? 'var(--accent-red)' : 'var(--ops-muted)'],
+                    ['Net Earnings',                     presentationTotals.netEarnings,           'var(--ops-text)'],
                     ['Total Income Received',           record.current_earnings,               'var(--ops-text)'],
                     ['Total Deductions',                -record.deductions,                    record.deductions > 0 ? 'var(--accent-red)' : 'var(--ops-muted)'],
                     ['Opening Balance B/F',             record.opening_balance,                'var(--ops-muted)'],
@@ -1276,7 +1312,7 @@ export default function StatementDetailPage() {
                     ['Total Payable',                    record.payable_amount,                 record.is_payable ? 'var(--accent-green)' : 'var(--ops-muted)'],
                     ['Carry Forward To Next Statement',  record.carry_forward_amount,            record.carry_forward_amount > 0 ? 'var(--accent-amber)' : 'var(--ops-muted)'],
                   ].map(([label, value, color], i) => (
-                    <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '2px 0', borderTop: [3, 5].includes(i) ? '1px solid var(--ops-border)' : 'none', paddingTop: [3, 5].includes(i) ? 6 : 2 }}>
+                    <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '2px 0', borderTop: [3, 6, 8].includes(i) ? '1px solid var(--ops-border)' : 'none', paddingTop: [3, 6, 8].includes(i) ? 6 : 2 }}>
                       <span style={{ color: 'var(--ops-muted)', fontSize: 11 }}>{label as string}</span>
                       <span style={{ fontWeight: [5].includes(i) ? 700 : 400, color: color as string }}>
                         {formatCurrency(value as number, currency)}
@@ -1349,8 +1385,12 @@ export default function StatementDetailPage() {
             <div className="card-header"><span className="text-sm font-semibold">Payee</span></div>
             <div className="card-body space-y-2 text-sm">
               <Link href={`/payees/${payee?.id}`} className="text-blue-400 hover:underline font-medium block">
-                {payee?.payee_name}
+                {payeeDisplayName}
               </Link>
+              {performerName && (
+                <div className="text-xs text-ops-muted">Performer: {performerName}</div>
+              )}
+              <div className="text-xs text-ops-subtle">Legal payee: {payee?.payee_name}</div>
               {payee?.primary_contact_name && (
                 <div className="text-xs text-ops-muted">{payee.primary_contact_name}</div>
               )}

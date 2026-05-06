@@ -10,36 +10,16 @@ import type { StatementRecord, StatementLineSummary } from '@/lib/types'
 import { formatCurrency } from '@/lib/utils/balanceEngine'
 import { LOGO_BASE64 } from '@/lib/constants/statementBrand'
 import {
-  activeStatementBuckets,
-  buildStatementPivot,
-  STATEMENT_BUCKET_LABELS,
-  type StatementIncomeBucket,
+  buildIncomeTypeSections,
+  calculateStatementPresentationTotals,
+  getLinePresentationValues,
 } from '@/lib/utils/statementPresentation'
-
-// ============================================================
-// SONY WIDE-FORMAT PIVOT HELPERS
-// ============================================================
-
-interface SonyPivotRow {
-  title: string
-  identifier: string | null
-  buckets: Partial<Record<StatementIncomeBucket, number>>
-  total: number
-}
 
 interface OutputCostRow {
   description: string
   cost_date: string | null
   notes: string | null
   amount: number
-}
-
-function buildOutputPivot(lines: StatementLineSummary[]): SonyPivotRow[] {
-  return buildStatementPivot(lines)
-}
-
-function activeSonyBuckets(rows: SonyPivotRow[]): StatementIncomeBucket[] {
-  return activeStatementBuckets(rows)
 }
 
 function splitStatementLines(lines: StatementLineSummary[]) {
@@ -65,6 +45,7 @@ export interface StatementOutputData {
   record: StatementRecord
   payee_name: string
   statement_name: string     // payee name as it appears on statements
+  performer_name?: string | null
   contract_name: string      // included so payees know which deal this statement is for
   contract_code: string | null
   period_label: string
@@ -97,13 +78,17 @@ function csvRow(cells: (string | number | null | undefined)[]): string {
  */
 export function generateCSV(data: StatementOutputData): string {
   const { record, payee_name, period_label, currency, lines } = data
-  const { earningLines, costLines } = splitStatementLines(lines)
+  const { costLines } = splitStatementLines(lines)
   const costRows = buildCostRows(costLines)
+  const totals = calculateStatementPresentationTotals(lines)
+  const sections = buildIncomeTypeSections(lines)
+  const deductionLines = lines.filter(line => line.line_category !== 'income' && line.line_category !== 'cost' && (line.deduction_amount ?? 0) > 0)
   const rows: string[] = []
 
   // Header block
   rows.push(csvRow(['STATEMENT OF ACCOUNT']))
-  rows.push(csvRow(['Payee', payee_name]))
+  rows.push(csvRow(['Payee', data.statement_name || payee_name]))
+  if (data.performer_name) rows.push(csvRow(['Performer Name', data.performer_name]))
   rows.push(csvRow(['Contract', data.contract_name + (data.contract_code ? ` (${data.contract_code})` : '')]))
   rows.push(csvRow(['Statement Type', record.domain === 'master' ? 'Master Royalties' : 'Publishing']))
   rows.push(csvRow(['Royalty Share', record.royalty_share_snapshot != null ? `${(record.royalty_share_snapshot * 100).toFixed(2)}%` : '—']))
@@ -116,8 +101,8 @@ export function generateCSV(data: StatementOutputData): string {
   rows.push(csvRow(['Opening Balance', record.opening_balance]))
   rows.push(csvRow(['Current Period Earnings', record.current_earnings]))
   rows.push(csvRow(['Deductions', record.deductions]))
-  rows.push(csvRow(['Closing Balance (Pre-Carryover)', record.closing_balance_pre_carryover]))
-  rows.push(csvRow(['Prior Period Carryover Applied', record.prior_period_carryover_applied]))
+  rows.push(csvRow(['Closing Balance', record.closing_balance_pre_carryover]))
+  rows.push(csvRow(['Prior Period Carryover', record.prior_period_carryover_applied]))
   rows.push(csvRow(['Final Balance', record.final_balance_after_carryover]))
   rows.push(csvRow([]))
 
@@ -132,33 +117,46 @@ export function generateCSV(data: StatementOutputData): string {
 
   rows.push(csvRow([]))
 
-  // Line summaries — Sony wide-format pivot
-  if (earningLines.length > 0) {
-    const pivotRows = buildOutputPivot(earningLines)
-    const active    = activeSonyBuckets(pivotRows)
-
-    rows.push(csvRow(['LINE DETAIL']))
-    rows.push(csvRow([
-      'Song Title',
-      'Identifier',
-      ...active.map(b => STATEMENT_BUCKET_LABELS[b]),
-      'Song Total',
-    ]))
-    for (const row of pivotRows) {
+  if (sections.length > 0) {
+    rows.push(csvRow(['INCOME TYPE DETAIL']))
+    for (const section of sections) {
+      rows.push(csvRow([section.label.toUpperCase()]))
+      rows.push(csvRow(['Title', 'Identifier', 'Income Type %', 'Gross Amount', 'Net Amount']))
+      for (const row of section.rows) {
+        rows.push(csvRow([
+          row.title,
+          row.identifier ?? '',
+          row.incomeTypePercent != null ? `${(row.incomeTypePercent * 100).toFixed(2)}%` : '—',
+          row.grossBasis,
+          row.net,
+        ]))
+      }
       rows.push(csvRow([
-        row.title,
-        row.identifier ?? '',
-        ...active.map(b => row.buckets[b] ?? 0),
-        row.total,
+        `${section.label} Total`,
+        '',
+        '',
+        '',
+        section.grossBasisTotal,
+        section.netTotal,
+      ]))
+      rows.push(csvRow([]))
+    }
+  }
+
+  if (deductionLines.length > 0) {
+    rows.push(csvRow(['DEDUCTIONS']))
+    rows.push(csvRow(['Type', 'Title', 'Identifier', 'Deduction', 'Notes']))
+    for (const line of deductionLines) {
+      const values = getLinePresentationValues(line)
+      rows.push(csvRow([
+        line.line_category ?? '',
+        line.title ?? '',
+        line.identifier ?? '',
+        values.deduction,
+        line.notes ?? '',
       ]))
     }
-    // Totals row
-    rows.push(csvRow([
-      'TOTAL',
-      '',
-      ...active.map(b => pivotRows.reduce((s, r) => s + (r.buckets[b] ?? 0), 0)),
-      pivotRows.reduce((s, r) => s + r.total, 0),
-    ]))
+    rows.push(csvRow([]))
   }
 
   if (costRows.length > 0) {
@@ -211,8 +209,11 @@ export async function downloadExcel(
 ): Promise<void> {
   const XLSX = await import('xlsx')
   const { record, payee_name, period_label, currency, lines } = data
-  const { earningLines, costLines } = splitStatementLines(lines)
+  const { costLines } = splitStatementLines(lines)
   const costRows = buildCostRows(costLines)
+  const totals = calculateStatementPresentationTotals(lines)
+  const sections = buildIncomeTypeSections(lines)
+  const deductionLines = lines.filter(line => line.line_category !== 'income' && line.line_category !== 'cost' && (line.deduction_amount ?? 0) > 0)
 
   const wb = XLSX.utils.book_new()
 
@@ -220,7 +221,8 @@ export async function downloadExcel(
   const summaryRows: (string | number | null)[][] = [
     ['STATEMENT OF ACCOUNT'],
     [],
-    ['Payee', payee_name],
+    ['Payee', data.statement_name || payee_name],
+    ...(data.performer_name ? [['Performer Name', data.performer_name] as (string | number | null)[]] : []),
     ['Contract', data.contract_name + (data.contract_code ? ` (${data.contract_code})` : '')],
     ['Statement Type', record.domain === 'master' ? 'Master Royalties' : 'Publishing'],
     ['Royalty Share', record.royalty_share_snapshot != null ? `${(record.royalty_share_snapshot * 100).toFixed(2)}%` : '—'],
@@ -231,8 +233,8 @@ export async function downloadExcel(
     ['Opening Balance', record.opening_balance],
     ['Current Period Earnings', record.current_earnings],
     ['Deductions', record.deductions],
-    ['Closing Balance (Pre-Carryover)', record.closing_balance_pre_carryover],
-    ['Prior Period Carryover Applied', record.prior_period_carryover_applied],
+    ['Closing Balance', record.closing_balance_pre_carryover],
+    ['Prior Period Carryover', record.prior_period_carryover_applied],
     ['Final Balance', record.final_balance_after_carryover],
     [],
   ]
@@ -260,42 +262,49 @@ export async function downloadExcel(
 
   XLSX.utils.book_append_sheet(wb, summarySheet, 'Summary')
 
-  // ---- Line Detail Sheet — Sony wide-format ----
-  if (earningLines.length > 0) {
-    const pivotRows = buildOutputPivot(earningLines)
-    const active    = activeSonyBuckets(pivotRows)
+  if (sections.length > 0 || deductionLines.length > 0) {
+    const detailRows: (string | number | null)[][] = []
+    for (const section of sections) {
+      detailRows.push([section.label.toUpperCase()])
+      detailRows.push(['Title', 'Identifier', 'Income Type %', 'Gross Basis', 'Net Amount'])
+      for (const row of section.rows) {
+        detailRows.push([
+          row.title,
+          row.identifier ?? '',
+          row.incomeTypePercent != null ? `${(row.incomeTypePercent * 100).toFixed(2)}%` : '—',
+          row.grossBasis,
+          row.net,
+        ])
+      }
+      detailRows.push([`${section.label} Total`, '', '', '', section.grossBasisTotal, section.netTotal])
+      detailRows.push([])
+    }
 
-    const lineHeaders = [
-      'Song Title',
-      'Identifier',
-      ...active.map(b => STATEMENT_BUCKET_LABELS[b]),
-      'Song Total',
-    ]
+    if (deductionLines.length > 0) {
+      detailRows.push(['DEDUCTIONS'])
+      detailRows.push(['Type', 'Title', 'Identifier', 'Deduction', 'Notes'])
+      for (const line of deductionLines) {
+        const values = getLinePresentationValues(line)
+        detailRows.push([
+          line.line_category ?? '',
+          line.title ?? '',
+          line.identifier ?? '',
+          values.deduction,
+          line.notes ?? '',
+        ])
+      }
+    }
 
-    const lineData = pivotRows.map(row => [
-      row.title,
-      row.identifier ?? '',
-      ...active.map(b => row.buckets[b] ?? 0),
-      row.total,
-    ])
-
-    // Totals row
-    lineData.push([
-      'TOTAL',
-      '',
-      ...active.map(b => pivotRows.reduce((s, r) => s + (r.buckets[b] ?? 0), 0)),
-      pivotRows.reduce((s, r) => s + r.total, 0),
-    ])
-
-    const lineSheet = XLSX.utils.aoa_to_sheet([lineHeaders, ...lineData])
-    // Col widths: title, identifier, then one per active bucket, then total
-    lineSheet['!cols'] = [
-      { wch: 36 },
-      { wch: 16 },
-      ...active.map(() => ({ wch: 14 })),
+    const detailSheet = XLSX.utils.aoa_to_sheet(detailRows)
+    detailSheet['!cols'] = [
+      { wch: 34 },
+      { wch: 18 },
       { wch: 14 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 18 },
     ]
-    XLSX.utils.book_append_sheet(wb, lineSheet, 'Line Detail')
+    XLSX.utils.book_append_sheet(wb, detailSheet, 'Income Detail')
   }
 
   if (costRows.length > 0) {
@@ -329,73 +338,65 @@ export async function downloadExcel(
 // HTML STATEMENT VIEW (printable)
 // ============================================================
 
-export function buildPrintableHTMLDocument(data: StatementOutputData): string {
+export function buildPrintableHTMLDocument(
+  data: StatementOutputData,
+  options?: { internalReview?: boolean }
+): string {
   const { record, payee_name, statement_name, period_label, currency, lines } = data
-  const { earningLines, costLines } = splitStatementLines(lines)
+  const { costLines } = splitStatementLines(lines)
   const costRows = buildCostRows(costLines)
-  const headerName = payee_name || statement_name
+  const totals = calculateStatementPresentationTotals(lines)
+  const sections = buildIncomeTypeSections(lines)
+  const deductionLines = lines.filter(line => line.line_category !== 'income' && line.line_category !== 'cost' && (line.deduction_amount ?? 0) > 0)
+  const headerName = statement_name || payee_name
   const showPublishingLogo = record.domain === 'publishing'
+  const internalReview = Boolean(options?.internalReview)
 
   const balanceRows = [
+    ...(internalReview ? [['Gross Earnings', totals.grossEarnings] as [string, number]] : []),
     ['Opening Balance', record.opening_balance],
     ['Current Period Earnings', record.current_earnings],
     ['Deductions', `(${record.deductions.toFixed(2)})`],
     ['Closing Balance', record.closing_balance_pre_carryover],
-    ...(record.prior_period_carryover_applied !== 0
-      ? [['Prior Period Carryover', record.prior_period_carryover_applied] as [string, number]]
-      : []),
+    ['Prior Period Carryover', record.prior_period_carryover_applied],
     ['Final Balance', record.final_balance_after_carryover],
+    ...(internalReview ? [['Net Earnings', totals.netEarnings] as [string, number]] : []),
   ]
 
   const linesHTML = (() => {
-    if (earningLines.length === 0) return ''
-    const pivotRows = buildOutputPivot(earningLines)
-    const active    = activeSonyBuckets(pivotRows)
-    const grandTotal = pivotRows.reduce((s, r) => s + r.total, 0)
-
-    const headerCells = [
-      '<th>Song Title</th>',
-      '<th>Identifier</th>',
-      ...active.map(b => `<th class="num">${STATEMENT_BUCKET_LABELS[b]}</th>`),
-      '<th class="num">Song Total</th>',
-    ].join('')
-
-    const dataRows = pivotRows.map(row => {
-      const bucketCells = active.map(b => {
-        const v = row.buckets[b] ?? 0
-        return `<td class="num">${v !== 0 ? v.toFixed(2) : '—'}</td>`
-      }).join('')
-      return `<tr>
-        <td>${row.title}</td>
-        <td class="mono">${row.identifier ?? ''}</td>
-        ${bucketCells}
-        <td class="num"><strong>${row.total.toFixed(2)}</strong></td>
-      </tr>`
-    }).join('')
-
-    const totalCells = active.map(b => {
-      const v = pivotRows.reduce((s, r) => s + (r.buckets[b] ?? 0), 0)
-      return `<td class="num"><strong>${v !== 0 ? v.toFixed(2) : '—'}</strong></td>`
-    }).join('')
-
-    return `
-    <h2>Line Detail</h2>
-    <table class="lines">
-      <thead>
-        <tr>${headerCells}</tr>
-      </thead>
-      <tbody>
-        ${dataRows}
-      </tbody>
-      <tfoot>
-        <tr style="border-top:2px solid #ccc;">
-          <td><strong>Total</strong></td>
-          <td></td>
-          ${totalCells}
-          <td class="num"><strong>${grandTotal.toFixed(2)}</strong></td>
+    if (sections.length === 0) return ''
+    return sections.map(section => {
+    const rowsHtml = section.rows.map(row => `
+        <tr>
+          <td>${row.title}</td>
+          <td class="mono">${row.identifier ?? ''}</td>
+          <td class="num">${row.incomeTypePercent != null ? `${(row.incomeTypePercent * 100).toFixed(2)}%` : '—'}</td>
+          <td class="num">${row.grossBasis !== 0 ? row.grossBasis.toFixed(2) : '—'}</td>
+          <td class="num"><strong>${row.net !== 0 ? row.net.toFixed(2) : '—'}</strong></td>
         </tr>
-      </tfoot>
-    </table>`
+      `).join('')
+      return `
+      <h2>${section.label}</h2>
+      <table class="lines">
+        <thead>
+          <tr>
+            <th>Title</th>
+            <th>Identifier</th>
+            <th class="num">Income Type %</th>
+          <th class="num">Gross Amount</th>
+            <th class="num">Net Amount</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+        <tfoot>
+          <tr style="border-top:2px solid #ccc;">
+            <td colspan="3"><strong>${section.label} Total</strong></td>
+            <td class="num"><strong>${section.grossBasisTotal.toFixed(2)}</strong></td>
+            <td class="num"><strong>${section.netTotal.toFixed(2)}</strong></td>
+          </tr>
+        </tfoot>
+      </table>`
+    }).join('')
   })()
 
   const costsHTML = (() => {
@@ -434,6 +435,70 @@ export function buildPrintableHTMLDocument(data: StatementOutputData): string {
     </table>`
   })()
 
+  const deductionsHtml = (() => {
+    if (deductionLines.length === 0) return ''
+    const rowsHtml = deductionLines.map(line => {
+      const values = getLinePresentationValues(line)
+      return `
+      <tr>
+        <td>${line.line_category ?? '—'}</td>
+        <td>${line.title ?? '—'}</td>
+        <td class="mono">${line.identifier ?? '—'}</td>
+        <td class="num">${values.deduction !== 0 ? values.deduction.toFixed(2) : '—'}</td>
+      </tr>`
+    }).join('')
+    return `
+    <h2>Deductions</h2>
+    <table class="lines">
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Title</th>
+          <th>Identifier</th>
+          <th class="num">Amount</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>`
+  })()
+
+  const detailedLinesHtml = (() => {
+    if (!internalReview) return ''
+    const rowsHtml = lines.map(line => {
+      const values = getLinePresentationValues(line)
+      return `
+        <tr>
+          <td>${line.line_category ?? '—'}</td>
+          <td>${line.title ?? '—'}</td>
+          <td class="mono">${line.identifier ?? '—'}</td>
+          <td class="num">${values.sourceAmount != null && values.sourceAmount !== 0 ? values.sourceAmount.toFixed(2) : '—'}</td>
+          <td class="num">${values.incomeTypePercent != null ? `${(values.incomeTypePercent * 100).toFixed(2)}%` : '—'}</td>
+          <td class="num">${values.grossBasis !== 0 ? values.grossBasis.toFixed(2) : '—'}</td>
+          <td class="num">${values.deduction !== 0 ? values.deduction.toFixed(2) : '—'}</td>
+        <td class="num">${values.net !== 0 ? values.net.toFixed(2) : '—'}</td>
+      </tr>`
+    }).join('')
+    return `
+    <h2>Internal Review Detail</h2>
+    <table class="lines">
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Title</th>
+          <th>Identifier</th>
+          <th class="num">Source Amount</th>
+          <th class="num">Income Type %</th>
+          <th class="num">Gross Earnings</th>
+          <th class="num">Deduction</th>
+          <th class="num">Net</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rowsHtml}
+      </tbody>
+    </table>`
+  })()
+
   const payableBlock = record.is_payable
     ? `<div class="payable-box">
         <span class="label">PAYABLE THIS PERIOD</span>
@@ -448,6 +513,13 @@ export function buildPrintableHTMLDocument(data: StatementOutputData): string {
         <span class="label">RECOUPING</span>
         <span class="amount">${formatCurrency(record.final_balance_after_carryover, currency)}</span>
       </div>`
+
+  const performerLine = data.performer_name
+    ? `<div class="performer-line">Performer: ${data.performer_name}</div>`
+    : ''
+  const subtitle = internalReview
+    ? 'MUSIC MATTERS SONGS INTERNAL REVIEW'
+    : 'MUSIC MATTERS SONGS PUBLISHING STATEMENT'
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -468,6 +540,7 @@ export function buildPrintableHTMLDocument(data: StatementOutputData): string {
   .header-right { text-align: right; font-size: 12px; color: #555; }
   .type-badge { display: inline-block; background: #1a1a1a; color: #fff; padding: 2px 10px; border-radius: 3px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 6px; }
   .statement-subtitle { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; color: #555; margin-top: 8px; text-transform: uppercase; }
+  .performer-line { font-size: 12px; color: #555; margin-top: 6px; }
   table.balance { width: 380px; border-collapse: collapse; margin-bottom: 8px; }
   table.balance td { padding: 5px 8px; }
   table.balance td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
@@ -497,7 +570,8 @@ export function buildPrintableHTMLDocument(data: StatementOutputData): string {
       ${showPublishingLogo ? `<img src="${LOGO_BASE64}" alt="MMS logo" class="header-logo">` : ''}
       <div class="header-copy">
         <h1>${headerName}</h1>
-        <div class="statement-subtitle">MUSIC MATTERS SONGS PUBLISHING STATEMENT</div>
+        ${performerLine}
+        <div class="statement-subtitle">${subtitle}</div>
       </div>
     </div>
     <div class="header-right">
@@ -510,7 +584,7 @@ export function buildPrintableHTMLDocument(data: StatementOutputData): string {
   <table class="balance">
     ${balanceRows
       .map(([label, val], i) => {
-        const isFinal = i === balanceRows.length - 1
+        const isFinal = label === 'Final Balance'
         const cls = isFinal ? 'total' : label === 'Closing Balance' ? 'subtotal' : ''
         return `<tr class="${cls}"><td>${label}</td><td>${typeof val === 'number' ? val.toFixed(2) : val}</td></tr>`
       })
@@ -520,6 +594,8 @@ export function buildPrintableHTMLDocument(data: StatementOutputData): string {
   ${payableBlock}
 
   ${linesHTML}
+  ${deductionsHtml}
+  ${detailedLinesHtml}
   ${costsHTML}
 
   <div class="footer">
@@ -538,9 +614,9 @@ export function buildPrintableHTMLDocument(data: StatementOutputData): string {
  */
 export function openPrintableHTML(
   data: StatementOutputData,
-  options?: { autoPrint?: boolean }
+  options?: { autoPrint?: boolean; internalReview?: boolean }
 ): Window | null {
-  const html = buildPrintableHTMLDocument(data)
+  const html = buildPrintableHTMLDocument(data, { internalReview: options?.internalReview })
   const win = window.open('', '_blank')
   if (!win) return null
 

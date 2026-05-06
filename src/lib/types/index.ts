@@ -143,6 +143,8 @@ export function incomeTypeToRateColumn(incomeType: string | null | undefined): k
 export interface Payee {
   id:                   string
   payee_name:           string
+  display_name:         string | null
+  performer_name:       string | null
   statement_name:       string | null
   primary_contact_name: string | null
   primary_email:        string | null

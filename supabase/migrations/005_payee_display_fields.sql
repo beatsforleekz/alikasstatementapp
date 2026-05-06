@@ -1,0 +1,3 @@
+ALTER TABLE payees
+  ADD COLUMN IF NOT EXISTS display_name TEXT,
+  ADD COLUMN IF NOT EXISTS performer_name TEXT;

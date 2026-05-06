@@ -5,7 +5,7 @@ import { Alert, LoadingSpinner, DomainBadge, Amount, EmptyState } from '@/compon
 import { Mail, CheckCircle, RefreshCw, Filter, AlertTriangle, Send, Copy, Trash2 } from 'lucide-react'
 import Link from 'next/link'
 import type { StatementPeriod } from '@/lib/types'
-import { getStatementCurrency } from '@/lib/utils/statementPresentation'
+import { getStatementCurrency, resolvePayeeDisplayName } from '@/lib/utils/statementPresentation'
 import { sortByLabel } from '@/lib/utils/sortOptions'
 
 function splitPayeeNames(name: string) {
@@ -17,13 +17,13 @@ function splitPayeeNames(name: string) {
 
 function getContractPayeeNames(record: any) {
   return (record.contract_payees ?? [])
-    .map((link: any) => String(link?.payee?.payee_name ?? '').trim())
+    .map((link: any) => resolvePayeeDisplayName(link?.payee))
     .filter(Boolean)
 }
 
 function getGreetingFirstNames(record: any) {
   const contractPayeeNames = getContractPayeeNames(record)
-  const names = (contractPayeeNames.length > 0 ? contractPayeeNames : splitPayeeNames(String(record.payee?.statement_name ?? record.payee?.payee_name ?? '').trim()))
+  const names = (contractPayeeNames.length > 0 ? contractPayeeNames : splitPayeeNames(resolvePayeeDisplayName(record.payee)))
     .map((name: string) => name.split(/\s+/).filter(Boolean)[0] ?? '')
     .filter(Boolean)
   return names.join(', ')
@@ -32,7 +32,7 @@ function getGreetingFirstNames(record: any) {
 function getPayeeFullName(record: any) {
   const contractPayeeNames = getContractPayeeNames(record)
   if (contractPayeeNames.length > 0) return contractPayeeNames.join(', ')
-  return String(record.payee?.statement_name ?? record.payee?.payee_name ?? '').trim()
+  return resolvePayeeDisplayName(record.payee)
 }
 
 export default function EmailPrepPage() {
@@ -55,7 +55,7 @@ export default function EmailPrepPage() {
     const [recRes, perRes] = await Promise.all([
       supabase
         .from('statement_records')
-        .select('*, payee:payees(payee_name, statement_name, primary_email, secondary_email, currency), contract:contracts(contract_name, contract_code), statement_period:statement_periods(label)')
+        .select('*, payee:payees(payee_name, display_name, performer_name, statement_name, primary_email, secondary_email, currency), contract:contracts(contract_name, contract_code), statement_period:statement_periods(label)')
         .eq('approval_status', 'approved')
         .eq('output_generated_flag', true)
         .order('created_at', { ascending: false }),
@@ -68,7 +68,7 @@ export default function EmailPrepPage() {
     if (contractIds.length > 0) {
       const { data: payeeLinks } = await supabase
         .from('contract_payee_links')
-        .select('contract_id, payee_id, royalty_share, is_active, payee:payees(payee_name, statement_name, primary_email, secondary_email, currency)')
+        .select('contract_id, payee_id, royalty_share, is_active, payee:payees(payee_name, display_name, performer_name, statement_name, primary_email, secondary_email, currency)')
         .eq('is_active', true)
         .in('contract_id', contractIds)
       contractPayeeLinks = payeeLinks ?? []
@@ -340,7 +340,7 @@ function EmailPrepCard({
     <div className={`card ${isSent ? 'opacity-60' : ''}`}>
       <div className="card-header">
         <div className="flex items-center gap-3 flex-wrap">
-          <span className="text-sm font-semibold">{r.payee?.payee_name}</span>
+          <span className="text-sm font-semibold">{resolvePayeeDisplayName(r.payee)}</span>
           <span className="text-sm text-ops-muted">—</span>
           <span className="text-sm font-medium text-ops-text">{r.contract?.contract_name ?? '—'}</span>
           {r.contract?.contract_code && <span className="font-mono text-xs text-ops-muted">{r.contract.contract_code}</span>}

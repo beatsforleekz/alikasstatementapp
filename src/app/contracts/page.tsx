@@ -851,6 +851,8 @@ type PayeeLinkRow = {
 
 type NewPayeeFormState = {
   payee_name: string
+  display_name: string
+  performer_name: string
   statement_name: string
   primary_contact_name: string
   primary_email: string
@@ -884,6 +886,8 @@ function ContractPayeeLinksPanel({
   const [showCreatePayee, setShowCreatePayee] = useState(false)
   const [newPayee, setNewPayee]               = useState<NewPayeeFormState>({
     payee_name: '',
+    display_name: '',
+    performer_name: '',
     statement_name: '',
     primary_contact_name: '',
     primary_email: '',
@@ -946,6 +950,8 @@ function ContractPayeeLinksPanel({
   function resetNewPayee() {
     setNewPayee({
       payee_name: '',
+      display_name: '',
+      performer_name: '',
       statement_name: '',
       primary_contact_name: '',
       primary_email: '',
@@ -1030,6 +1036,8 @@ function ContractPayeeLinksPanel({
     const timestamp = new Date().toISOString()
     const payeePayload = {
       payee_name: payeeName,
+      display_name: newPayee.display_name.trim() || null,
+      performer_name: newPayee.performer_name.trim() || null,
       statement_name: newPayee.statement_name.trim() || null,
       primary_contact_name: newPayee.primary_contact_name.trim() || null,
       primary_email: newPayee.primary_email.trim() || null,
@@ -1296,11 +1304,19 @@ function ContractPayeeLinksPanel({
           <>
             <div className="grid grid-cols-2 gap-3">
               <div className="ops-field">
-                <label className="ops-label">Payee Name *</label>
+                <label className="ops-label">Payee Name * (legal / internal)</label>
                 <input className="ops-input text-xs" value={newPayee.payee_name} onChange={e => setNewPayeeField('payee_name', e.target.value)} />
               </div>
               <div className="ops-field">
-                <label className="ops-label">Statement Name</label>
+                <label className="ops-label">Display Name</label>
+                <input className="ops-input text-xs" value={newPayee.display_name} onChange={e => setNewPayeeField('display_name', e.target.value)} />
+              </div>
+              <div className="ops-field">
+                <label className="ops-label">Performer Name</label>
+                <input className="ops-input text-xs" value={newPayee.performer_name} onChange={e => setNewPayeeField('performer_name', e.target.value)} />
+              </div>
+              <div className="ops-field">
+                <label className="ops-label">Statement Name (legacy)</label>
                 <input className="ops-input text-xs" value={newPayee.statement_name} onChange={e => setNewPayeeField('statement_name', e.target.value)} />
               </div>
               <div className="ops-field">
