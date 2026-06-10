@@ -1,8 +1,11 @@
 'use client'
+import { useEffect, useState } from 'react'
 import { useTheme } from '@/lib/theme/ThemeContext'
 import type { Theme } from '@/lib/theme/ThemeContext'
-import { Sun, Moon, Monitor, Settings, Info, Send } from 'lucide-react'
+import { Sun, Moon, Monitor, Settings, Info, Send, UserRound } from 'lucide-react'
 import { IMPORT_TYPE_OPTIONS } from '@/lib/types'
+import { useAuth } from '@/lib/auth/AuthContext'
+import { supabase } from '@/lib/supabase/client'
 
 const THEME_OPTIONS: { value: Theme; label: string; icon: React.ElementType; desc: string }[] = [
   { value: 'light',  label: 'Light',  icon: Sun,     desc: 'Clean, high-contrast light background. Default.' },
@@ -18,9 +21,49 @@ const BADGE_STYLES: Record<string, string> = {
 
 export default function SettingsPage() {
   const { theme, setTheme, resolvedTheme } = useTheme()
+  const { user, profile, refreshProfile } = useAuth()
+  const [displayName, setDisplayName] = useState('')
+  const [jobTitle, setJobTitle] = useState('')
+  const [savingProfile, setSavingProfile] = useState(false)
+  const [profileMessage, setProfileMessage] = useState<string | null>(null)
+  const [profileError, setProfileError] = useState<string | null>(null)
 
   const masterTypes     = IMPORT_TYPE_OPTIONS.filter(o => o.domain === 'master')
   const publishingTypes = IMPORT_TYPE_OPTIONS.filter(o => o.domain === 'publishing')
+
+  useEffect(() => {
+    setDisplayName(
+      profile?.display_name
+      ?? user?.user_metadata?.display_name
+      ?? user?.user_metadata?.full_name
+      ?? user?.user_metadata?.name
+      ?? user?.email
+      ?? ''
+    )
+    setJobTitle(profile?.job_title ?? '')
+  }, [profile, user])
+
+  async function saveProfile() {
+    if (!user) return
+    setSavingProfile(true)
+    setProfileError(null)
+    setProfileMessage(null)
+    const { error } = await supabase
+      .from('user_profiles')
+      .update({
+        display_name: displayName.trim() || null,
+        job_title: jobTitle.trim() || null,
+      })
+      .eq('id', user.id)
+    if (error) {
+      setProfileError(error.message)
+      setSavingProfile(false)
+      return
+    }
+    await refreshProfile()
+    setProfileMessage('Profile updated.')
+    setSavingProfile(false)
+  }
 
   return (
     <div className="space-y-6 max-w-2xl">
@@ -31,6 +74,62 @@ export default function SettingsPage() {
             <h1 className="page-title">Settings</h1>
           </div>
           <p className="page-subtitle">Application preferences and appearance</p>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-header">
+          <div className="flex items-center gap-2">
+            <UserRound size={14} className="text-ops-muted" />
+            <span className="text-sm font-semibold" style={{ color: 'var(--ops-text)' }}>Your Profile</span>
+          </div>
+          <span className="text-xs text-ops-muted">
+            Used for approval and audit display
+          </span>
+        </div>
+        <div className="card-body space-y-4">
+          <p className="text-xs" style={{ color: 'var(--ops-muted)' }}>
+            Set the name that should appear when you approve statements or complete review actions.
+          </p>
+          <div className="space-y-3">
+            <div className="ops-field">
+              <label className="ops-label">Display Name</label>
+              <input
+                className="ops-input"
+                value={displayName}
+                onChange={e => setDisplayName(e.target.value)}
+                placeholder="Your name for approvals"
+              />
+            </div>
+            <div className="ops-field">
+              <label className="ops-label">Job Title</label>
+              <input
+                className="ops-input"
+                value={jobTitle}
+                onChange={e => setJobTitle(e.target.value)}
+                placeholder="Optional"
+              />
+            </div>
+            <div className="ops-field">
+              <label className="ops-label">Email</label>
+              <input
+                className="ops-input"
+                value={user?.email ?? ''}
+                disabled
+              />
+            </div>
+          </div>
+          {profileError && (
+            <div className="text-xs text-red-400">{profileError}</div>
+          )}
+          {profileMessage && (
+            <div className="text-xs text-green-400">{profileMessage}</div>
+          )}
+          <div className="flex justify-end">
+            <button onClick={() => { void saveProfile() }} className="btn-primary" disabled={savingProfile || !user}>
+              {savingProfile ? 'Saving…' : 'Save Profile'}
+            </button>
+          </div>
         </div>
       </div>
 

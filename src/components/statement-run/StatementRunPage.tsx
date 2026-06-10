@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase/client'
+import { useAuth } from '@/lib/auth/AuthContext'
 import {
   Alert, LoadingSpinner, DomainBadge, StatCard, SectionHeader,
   ApprovalBadge, PayableBadge, Amount, EmptyState,
@@ -929,6 +930,7 @@ function CurrencyPreviewPanel({
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function StatementRunPage() {
+  const { user, profile } = useAuth()
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
@@ -1701,11 +1703,28 @@ export default function StatementRunPage() {
   // ── Per-record actions ─────────────────────────────────────────────────────
 
   const updateApproval = async (id: string, status: string) => {
+    const approverName =
+      profile?.display_name?.trim()
+      || profile?.job_title?.trim()
+      user?.user_metadata?.display_name
+      || user?.user_metadata?.full_name
+      || user?.user_metadata?.name
+      || user?.email
+      || 'User'
+    const approvedAt = status === 'approved' ? new Date().toISOString() : null
+    const approvalUpdate = status === 'approved'
+      ? { approval_status: status, approved_at: approvedAt, approved_by: approverName }
+      : { approval_status: status, approved_at: null, approved_by: null }
     setSaving(id)
     const { error: err } = await supabase.from('statement_records')
-      .update({ approval_status: status, approved_at: new Date().toISOString() }).eq('id', id)
+      .update(approvalUpdate).eq('id', id)
     if (err) setError(err.message)
-    else setRecords(rs => rs.map(r => r.id === id ? { ...r, approval_status: status } : r))
+    else setRecords(rs => rs.map(r => r.id === id ? {
+      ...r,
+      approval_status: status,
+      approved_at: approvedAt,
+      approved_by: status === 'approved' ? approverName : null,
+    } : r))
     setSaving(null)
   }
 
