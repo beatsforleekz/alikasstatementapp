@@ -2160,7 +2160,7 @@ export default function StatementRunPage() {
         <select style={iStyle} value={approvalFilter} onChange={e => setApprovalFilter(e.target.value)}>
           <option value="">All approval statuses</option>
           <option value="approved">Approved</option>
-          <option value="on_hold">On Hold</option>
+          <option value="on_hold">Approval Hold</option>
           <option value="pending">Pending</option>
           <option value="rejected">Rejected</option>
         </select>
@@ -2795,6 +2795,10 @@ export default function StatementRunPage() {
                         </div>
                         <div><span style={{ color: 'var(--ops-muted)' }}>Royalty Share: </span><span style={{ fontFamily: 'monospace' }}>{fmtShare(rec.royalty_share_snapshot)}</span></div>
                         <div><span style={{ color: 'var(--ops-muted)' }}>Hold Flag: </span><span>{rec.hold_payment_flag ? '⚠ Yes' : 'No'}</span></div>
+                        <div>
+                          <span style={{ color: 'var(--ops-muted)' }}>Approval Status: </span>
+                          <span>{rec.approval_status === 'on_hold' ? 'Approval Hold' : rec.approval_status}</span>
+                        </div>
                         <div><span style={{ color: 'var(--ops-muted)' }}>Email: </span>
                           {rec.payee?.primary_email
                             ? <span>{rec.payee.primary_email}</span>
@@ -2828,8 +2832,14 @@ export default function StatementRunPage() {
                             <Unlock size={11} /> Un-approve
                           </button>
                         )}
+                        {rec.approval_status === 'on_hold' && (
+                          <button className="btn-sm btn-ghost" disabled={isSaving} onClick={() => updateApproval(rec.id, 'pending')}
+                            style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--accent-amber)' }}>
+                            <Unlock size={11} /> Release Approval Hold
+                          </button>
+                        )}
                         {rec.approval_status !== 'on_hold' && (
-                          <button className="btn-sm btn-ghost" disabled={isSaving} onClick={() => updateApproval(rec.id, 'on_hold')}>Hold</button>
+                          <button className="btn-sm btn-ghost" disabled={isSaving} onClick={() => updateApproval(rec.id, 'on_hold')}>Approval Hold</button>
                         )}
                         {/* Task 1 FIX: route to /statements/[id] using the statement record id.
                             Previously routed to /statements?contract=...&payee=...&period=...

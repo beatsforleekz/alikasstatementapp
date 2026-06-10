@@ -56,7 +56,7 @@ export function ApprovalBadge({ status }: { status: string }) {
     approved: 'Approved',
     pending: 'Pending',
     rejected: 'Rejected',
-    on_hold: 'On Hold',
+    on_hold: 'Approval Hold',
   }
   return (
     <span className={map[status] ?? 'badge-pending'}>
