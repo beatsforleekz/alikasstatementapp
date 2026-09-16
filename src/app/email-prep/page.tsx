@@ -126,17 +126,24 @@ export default function EmailPrepPage() {
     const greetingName = getGreetingFirstNames(record) || getPayeeFullName(record)
     const period = record.statement_period?.label ?? ''
     const currency = getStatementCurrency(record)
-    const payableAmount = new Intl.NumberFormat('en-GB', {
+    const formatAmount = (amount: number) => new Intl.NumberFormat('en-GB', {
       style: 'currency',
       currency,
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
-    }).format(Number(record.payable_amount ?? 0))
+    }).format(amount)
+    const payableValue = Number(record.payable_amount ?? 0)
+    const carryForwardValue = Number(record.carry_forward_amount ?? 0)
+    const finalBalanceValue = Number(record.final_balance_after_carryover ?? 0)
+    const payableAmount = formatAmount(payableValue)
+    const carriedTotal = formatAmount(carryForwardValue > 0 ? carryForwardValue : finalBalanceValue)
 
-    if (record.is_payable && Number(record.payable_amount ?? 0) > 0) {
+    if (record.is_payable && payableValue > 0) {
       return `Dear ${greetingName},
 
 Please find your statement for ${period} attached.
+
+Total: ${payableAmount}
 
 Please send invoice for ${payableAmount} to
 
@@ -150,6 +157,8 @@ Ref: ${period} Statement - Your Full Name`
     return `Dear ${greetingName},
 
 Please find your statements for ${period} attached.
+
+Total: ${carriedTotal}
 
 As payable balance is below €100 it will be forwarded onto your next statement.`
   }
