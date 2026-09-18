@@ -941,10 +941,14 @@ export default function EddyMasterRunPage() {
                         <td className="text-right font-mono whitespace-nowrap">{artist.statements.length}</td>
                         <td className="text-right font-mono whitespace-nowrap">{formatMoney(artistTotal(artist), currency)}</td>
                         <td className="text-right font-mono whitespace-nowrap">
-                          <div>{formatMoney(Number(artist.previous_carryover ?? 0), currency)}</div>
-                          {artist.imported_final_balance !== null && artist.imported_final_balance > 100 && (
-                            <div className="text-[11px] text-ops-muted">Source final {formatMoney(artist.imported_final_balance, currency)} · paid previously</div>
-                          )}
+                          <span
+                            className={artist.imported_final_balance !== null && artist.imported_final_balance > EDDY_PAYMENT_THRESHOLD ? 'cursor-help underline decoration-dotted underline-offset-2' : undefined}
+                            title={artist.imported_final_balance !== null && artist.imported_final_balance > EDDY_PAYMENT_THRESHOLD
+                              ? `Source final ${formatMoney(artist.imported_final_balance, currency)}; paid previously`
+                              : undefined}
+                          >
+                            {formatMoney(Number(artist.previous_carryover ?? 0), currency)}
+                          </span>
                         </td>
                         <td className="text-right font-mono font-semibold whitespace-nowrap">{formatMoney(amountDue(artist), currency)}</td>
                         <td className="whitespace-nowrap">{statusBadge(artist.status)}</td>
