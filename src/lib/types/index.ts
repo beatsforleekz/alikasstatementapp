@@ -353,6 +353,53 @@ export interface StatementPeriod {
 }
 
 // ============================================================
+// EDDY MASTER RUNS
+// Separate administration for master statements calculated in Eddy.
+// ============================================================
+export type EddyMasterRunStatus = 'to_prepare' | 'ready' | 'sent' | 'carry_forward'
+
+export interface EddyMasterRun {
+  id:                  string
+  statement_period_id: string
+  currency:            string
+  notes:               string | null
+  created_by:          string | null
+  created_at:          string
+  updated_at:          string
+  statement_period?:   StatementPeriod
+}
+
+export interface EddyMasterRunArtist {
+  id:                         string
+  run_id:                     string
+  payee_id:                   string | null
+  artist_name:                string
+  normalized_artist_name:     string
+  email:                      string | null
+  previous_carryover:         number
+  status:                     EddyMasterRunStatus
+  email_subject:              string | null
+  email_body:                 string | null
+  email_prepared_at:          string | null
+  sent_at:                    string | null
+  carryover_source_artist_id: string | null
+  carryover_import_id:        string | null
+  created_at:                 string
+  updated_at:                 string
+  payee?:                     Payee | null
+}
+
+export interface EddyMasterStatement {
+  id:              string
+  run_artist_id:   string
+  statement_label: string
+  amount:          number
+  file_reference:  string | null
+  created_at:      string
+  updated_at:      string
+}
+
+// ============================================================
 // IMPORTS
 // v2: added currency conversion fields
 // ============================================================

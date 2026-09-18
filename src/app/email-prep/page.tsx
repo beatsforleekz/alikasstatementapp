@@ -110,6 +110,12 @@ export default function EmailPrepPage() {
     setDraftBody(record.email_prepared_body ?? generateDefaultBody(record))
   }
 
+  function regenerateEmailPrep(record: any) {
+    setEditingRecord(record.id)
+    setDraftSubject(generateDefaultSubject(record))
+    setDraftBody(generateDefaultBody(record))
+  }
+
   function generateDefaultSubject(record: any) {
     const name     = getPayeeFullName(record)
     const period   = record.statement_period?.label ?? ''
@@ -189,8 +195,13 @@ As payable balance is below €100 it will be forwarded onto your next statement
   }
 
   async function deleteEmailPrep(recordId: string) {
-    if (!confirm('Delete this prepared email?')) return
-    await supabase.from('statement_records').update({
+    if (!confirm(
+      'Permanently remove this saved email prep?\n\n' +
+      'This removes only the prepared subject and body. The statement and its output will remain, and this item will return to Not Prepared so you can generate it again.'
+    )) return
+    setSavingId(recordId)
+    setError(null)
+    const { error: deleteError } = await supabase.from('statement_records').update({
       email_prepared_subject: null,
       email_prepared_body: null,
       email_status: 'not_prepared',
@@ -198,11 +209,19 @@ As payable balance is below €100 it will be forwarded onto your next statement
       email_prepared_by: null,
       updated_at: new Date().toISOString(),
     }).eq('id', recordId)
+    if (deleteError) {
+      setError(deleteError.message)
+      setSavingId(null)
+      return
+    }
     if (editingRecord === recordId) {
       setEditingRecord(null)
       setDraftSubject('')
       setDraftBody('')
     }
+    // A reset prep no longer matches the Prepared-only filter, so return it to a visible list.
+    if (statusFilter === 'prepared') setStatusFilter('open')
+    setSavingId(null)
     await load()
   }
 
@@ -290,6 +309,7 @@ As payable balance is below €100 it will be forwarded onto your next statement
               onSubjectChange={setDraftSubject}
               onBodyChange={setDraftBody}
               onEdit={() => startEdit(r)}
+              onRegenerate={() => regenerateEmailPrep(r)}
               onSave={() => saveEmailPrep(r.id)}
               onMarkSent={() => markSent(r.id)}
               onDelete={() => deleteEmailPrep(r.id)}
@@ -305,7 +325,7 @@ As payable balance is below €100 it will be forwarded onto your next statement
 
 function EmailPrepCard({
   record: r, isEditing, draftSubject, draftBody,
-  onSubjectChange, onBodyChange, onEdit, onSave, onMarkSent, onDelete, onCancel, saving
+  onSubjectChange, onBodyChange, onEdit, onRegenerate, onSave, onMarkSent, onDelete, onCancel, saving
 }: {
   record: any
   isEditing: boolean
@@ -314,6 +334,7 @@ function EmailPrepCard({
   onSubjectChange: (v: string) => void
   onBodyChange: (v: string) => void
   onEdit: () => void
+  onRegenerate: () => void
   onSave: () => void
   onMarkSent: () => void
   onDelete: () => void
@@ -446,6 +467,11 @@ function EmailPrepCard({
               {isPrepared ? 'Edit Email' : 'Prepare Email'}
             </button>
             {isPrepared && (
+              <button onClick={onRegenerate} className="btn-ghost btn-sm">
+                <RefreshCw size={12} /> Regenerate Email
+              </button>
+            )}
+            {isPrepared && (
               <button onClick={copyPreparedEmail} className="btn-ghost btn-sm" disabled={!r.email_prepared_subject && !r.email_prepared_body}>
                 <Copy size={12} /> {copied ? 'Copied' : 'Copy Email'}
               </button>
@@ -456,8 +482,8 @@ function EmailPrepCard({
               </button>
             )}
             {isPrepared && (
-              <button onClick={onDelete} className="btn-ghost btn-sm">
-                <Trash2 size={12} /> Delete Email Prep
+              <button onClick={onDelete} className="btn-ghost btn-sm" disabled={saving}>
+                {saving ? <LoadingSpinner size={12} /> : <Trash2 size={12} />} Reset Email Prep
               </button>
             )}
             <Link href={`/statements/${r.id}`} className="btn-ghost btn-sm">

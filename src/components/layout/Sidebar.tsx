@@ -33,6 +33,7 @@ const NAV_SECTIONS = [
     label: 'Statement Runs',
     items: [
       { href: '/statement-run?domain=master', label: 'Master Run', icon: Disc3 },
+      { href: '/eddy-master-run', label: 'Eddy Master Run', icon: Disc3 },
       { href: '/statement-run?domain=publishing', label: 'Publishing Run', icon: FileText },
     ],
   },
