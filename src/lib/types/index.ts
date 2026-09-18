@@ -374,6 +374,7 @@ export interface EddyMasterRunArtist {
   run_id:                     string
   payee_id:                   string | null
   artist_name:                string
+  imported_artist_name:       string | null
   normalized_artist_name:     string
   email:                      string | null
   previous_carryover:         number

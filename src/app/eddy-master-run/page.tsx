@@ -3,8 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Papa from 'papaparse'
 import {
-  ChevronDown, ChevronRight, Clipboard, FileSpreadsheet, Mail, Pencil,
-  Plus, RefreshCw, Save, Trash2, Upload, X,
+  ChevronDown, ChevronRight, Clipboard, FileSpreadsheet, Mail,
+  Plus, RefreshCw, Save, Search, Trash2, Upload, X,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase/client'
 import { useAuth } from '@/lib/auth/AuthContext'
@@ -13,6 +13,12 @@ import type {
   EddyMasterRun, EddyMasterRunArtist, EddyMasterRunStatus,
   EddyMasterStatement, Payee, PayeeAlias, StatementPeriod,
 } from '@/lib/types'
+import {
+  automaticallyMatchEddyPayee,
+  findDuplicateEddyRunPayee,
+  normalizeEddyPayeeName,
+  searchEddyPayees,
+} from '@/lib/utils/eddyPayeeMatching'
 
 type RunWithPeriod = EddyMasterRun & { statement_period: StatementPeriod }
 type ArtistRow = EddyMasterRunArtist & {
@@ -33,8 +39,14 @@ type ImportPreviewRow = {
   email: string
   sourcePeriod: string
   matchedPayee: Payee | null
+  matchMethod: 'automatic' | 'manual' | null
   issue: string | null
+  duplicateIssue: string | null
 }
+
+type PayeeMatchTarget =
+  | { kind: 'preview'; rowNumber: number; importedName: string }
+  | { kind: 'artist'; artistId: string; importedName: string }
 
 const STATUS_OPTIONS: { value: EddyMasterRunStatus; label: string }[] = [
   { value: 'to_prepare', label: 'To Prepare' },
@@ -42,10 +54,6 @@ const STATUS_OPTIONS: { value: EddyMasterRunStatus; label: string }[] = [
   { value: 'sent', label: 'Sent' },
   { value: 'carry_forward', label: 'Carry Forward' },
 ]
-
-function normalizeName(value: string | null | undefined) {
-  return (value ?? '').trim().replace(/\s+/g, ' ').toLowerCase()
-}
 
 function cleanText(value: unknown) {
   return String(value ?? '').trim().replace(/\s+/g, ' ')
@@ -119,8 +127,16 @@ export default function EddyMasterRunPage() {
   const [importRows, setImportRows] = useState<Record<string, unknown>[]>([])
   const [importMapping, setImportMapping] = useState<ImportMapping>({ artist: '', carryover: '', email: '', sourcePeriod: '' })
   const [importPreview, setImportPreview] = useState<ImportPreviewRow[]>([])
+  const [payeeMatchTarget, setPayeeMatchTarget] = useState<PayeeMatchTarget | null>(null)
+  const [payeeSearch, setPayeeSearch] = useState('')
+  const [selectedMatchPayeeId, setSelectedMatchPayeeId] = useState('')
+  const [payeeMatchError, setPayeeMatchError] = useState<string | null>(null)
 
   const selectedRun = runs.find(run => run.id === selectedRunId) ?? null
+  const payeeSearchResults = useMemo(
+    () => searchEddyPayees(payeeSearch, payees, aliases),
+    [payeeSearch, payees, aliases],
+  )
 
   useEffect(() => { void loadBase() }, [])
   useEffect(() => {
@@ -229,7 +245,7 @@ export default function EddyMasterRunPage() {
       .map(run => run.id)
     if (!priorRunIds.length) return null
     let query = supabase.from('eddy_master_run_artists').select('*').in('run_id', priorRunIds).eq('status', 'carry_forward')
-    query = payeeId ? query.eq('payee_id', payeeId) : query.eq('normalized_artist_name', normalizeName(artistName))
+    query = payeeId ? query.eq('payee_id', payeeId) : query.eq('normalized_artist_name', normalizeEddyPayeeName(artistName))
     const { data } = await query
     const candidates = (data ?? []) as EddyMasterRunArtist[]
     const latest = priorRunIds.map(id => candidates.find(row => row.run_id === id)).find(Boolean)
@@ -264,7 +280,7 @@ export default function EddyMasterRunPage() {
       run_id: selectedRun.id,
       payee_id: artistDraft.payeeId || null,
       artist_name: cleanText(artistDraft.name),
-      normalized_artist_name: normalizeName(artistDraft.name),
+      normalized_artist_name: normalizeEddyPayeeName(artistDraft.name),
       email: artistDraft.email.trim() || null,
       previous_carryover: parseAmount(artistDraft.previousCarryover) ?? 0,
       carryover_source_artist_id: prior?.sourceArtistId ?? null,
@@ -297,7 +313,7 @@ export default function EddyMasterRunPage() {
     setSaving(true)
     const { error: updateError } = await supabase.from('eddy_master_run_artists').update({
       artist_name: cleanText(artistEdit.name),
-      normalized_artist_name: normalizeName(artistEdit.name),
+      normalized_artist_name: normalizeEddyPayeeName(artistEdit.name),
       email: artistEdit.email.trim() || null,
       previous_carryover: parseAmount(artistEdit.previousCarryover) ?? 0,
     }).eq('id', artist.id)
@@ -400,19 +416,103 @@ export default function EddyMasterRunPage() {
     setCopied(true)
   }
 
-  function findPayee(rawName: string) {
-    const normalized = normalizeName(rawName)
-    const direct = payees.find(payee => [
-      payee.payee_name, payee.display_name, payee.statement_name, payee.performer_name,
-    ].some(name => normalizeName(name) === normalized))
-    if (direct) return direct
-    const alias = aliases.find(item => normalizeName(item.alias_name) === normalized)
-    return alias ? payees.find(payee => payee.id === alias.payee_id) ?? null : null
+  function validatePreviewDuplicates(rows: ImportPreviewRow[]) {
+    const next = rows.map(row => ({ ...row, duplicateIssue: null }))
+    const groups = new Map<string, ImportPreviewRow[]>()
+    next.forEach(row => {
+      if (!row.normalizedName) return
+      const key = row.matchedPayee ? `payee:${row.matchedPayee.id}` : `name:${row.normalizedName}`
+      groups.set(key, [...(groups.get(key) ?? []), row])
+    })
+    groups.forEach(group => {
+      if (group.length < 2) return
+      const values = new Set(group.map(row => row.carryover).filter(value => value !== null))
+      if (values.size > 1) {
+        group.forEach(row => { row.duplicateIssue = 'Duplicate payee has conflicting carryover values' })
+        return
+      }
+      group.slice(1).forEach(row => {
+        row.duplicateIssue = `Duplicate of row ${group[0].rowNumber}; this row will not import`
+      })
+    })
+    return next
+  }
+
+  function openPreviewPayeeMatch(row: ImportPreviewRow) {
+    setPayeeMatchTarget({ kind: 'preview', rowNumber: row.rowNumber, importedName: row.artistName })
+    setPayeeSearch(row.artistName)
+    setSelectedMatchPayeeId('')
+    setPayeeMatchError(null)
+  }
+
+  function openArtistPayeeMatch(artist: ArtistRow) {
+    setPayeeMatchTarget({
+      kind: 'artist',
+      artistId: artist.id,
+      importedName: artist.imported_artist_name || artist.artist_name,
+    })
+    setPayeeSearch(artist.imported_artist_name || artist.artist_name)
+    setSelectedMatchPayeeId('')
+    setPayeeMatchError(null)
+  }
+
+  function closePayeeMatch() {
+    setPayeeMatchTarget(null)
+    setPayeeSearch('')
+    setSelectedMatchPayeeId('')
+    setPayeeMatchError(null)
+  }
+
+  async function confirmPayeeMatch() {
+    if (!payeeMatchTarget || !selectedMatchPayeeId) return
+    const selectedPayee = payees.find(payee => payee.id === selectedMatchPayeeId)
+    if (!selectedPayee) return
+
+    if (payeeMatchTarget.kind === 'preview') {
+      const duplicateRow = importPreview.find(row =>
+        row.rowNumber !== payeeMatchTarget.rowNumber && row.matchedPayee?.id === selectedPayee.id
+      )
+      if (duplicateRow) {
+        setPayeeMatchError(`This payee is already matched to import row ${duplicateRow.rowNumber}.`)
+        return
+      }
+      setImportPreview(current => validatePreviewDuplicates(current.map(row =>
+        row.rowNumber === payeeMatchTarget.rowNumber
+          ? { ...row, matchedPayee: selectedPayee, matchMethod: 'manual' }
+          : row
+      )))
+      closePayeeMatch()
+      return
+    }
+
+    const targetArtist = artists.find(artist => artist.id === payeeMatchTarget.artistId)
+    if (!targetArtist) return
+    const duplicateArtist = findDuplicateEddyRunPayee(artists, selectedPayee.id, targetArtist.id)
+    if (duplicateArtist) {
+      setPayeeMatchError(`${displayPayeeName(selectedPayee)} is already linked to ${duplicateArtist.artist_name} in this run.`)
+      return
+    }
+
+    setSaving(true)
+    const { error: updateError } = await supabase.from('eddy_master_run_artists').update({
+      payee_id: selectedPayee.id,
+      email: targetArtist.email || selectedPayee.primary_email || null,
+    }).eq('id', targetArtist.id)
+    setSaving(false)
+    if (updateError) {
+      setPayeeMatchError(updateError.code === '23505'
+        ? 'That payee is already represented in this Eddy run.'
+        : updateError.message)
+      return
+    }
+    closePayeeMatch()
+    setNotice(`${targetArtist.artist_name} is now linked to ${displayPayeeName(selectedPayee)}.`)
+    if (selectedRun) await loadArtists(selectedRun.id)
   }
 
   function autoMap(headers: string[]): ImportMapping {
     const find = (...needles: string[]) => headers.find(header => {
-      const normalized = normalizeName(header).replace(/[^a-z0-9]/g, '')
+      const normalized = normalizeEddyPayeeName(header).replace(/[^a-z0-9]/g, '')
       return needles.some(needle => normalized.includes(needle))
     }) ?? ''
     return {
@@ -451,36 +551,27 @@ export default function EddyMasterRunPage() {
     const draft = importRows.map((row, index): ImportPreviewRow => {
       const artistName = cleanText(row[importMapping.artist])
       const carryover = parseAmount(row[importMapping.carryover])
+      const automaticMatch = artistName ? automaticallyMatchEddyPayee(artistName, payees, aliases) : null
       return {
         rowNumber: index + 2,
         artistName,
-        normalizedName: normalizeName(artistName),
+        normalizedName: normalizeEddyPayeeName(artistName),
         carryover,
         email: importMapping.email ? cleanText(row[importMapping.email]) : '',
         sourcePeriod: importMapping.sourcePeriod ? cleanText(row[importMapping.sourcePeriod]) : '',
-        matchedPayee: artistName ? findPayee(artistName) : null,
+        matchedPayee: automaticMatch,
+        matchMethod: automaticMatch ? 'automatic' : null,
         issue: !artistName ? 'Artist is blank' : carryover === null ? 'Carryover is blank or invalid' : null,
+        duplicateIssue: null,
       }
     })
-    const groups = new Map<string, ImportPreviewRow[]>()
-    draft.forEach(row => {
-      if (!row.normalizedName) return
-      const key = row.matchedPayee ? `payee:${row.matchedPayee.id}` : `name:${row.normalizedName}`
-      groups.set(key, [...(groups.get(key) ?? []), row])
-    })
-    groups.forEach(group => {
-      const values = new Set(group.map(row => row.carryover).filter(value => value !== null))
-      if (group.length > 1 && values.size > 1) {
-        group.forEach(row => { row.issue = 'Duplicate artist has conflicting carryover values' })
-      }
-    })
-    setImportPreview(draft)
+    setImportPreview(validatePreviewDuplicates(draft))
     setImportStep('preview')
   }
 
   async function commitImport() {
     if (!selectedRun) return
-    const valid = importPreview.filter(row => !row.issue)
+    const valid = importPreview.filter(row => !row.issue && !row.duplicateIssue)
     const deduped = Array.from(new Map(valid.map(row => [
       row.matchedPayee ? `payee:${row.matchedPayee.id}` : `name:${row.normalizedName}`,
       row,
@@ -494,8 +585,9 @@ export default function EddyMasterRunPage() {
     const sourcePeriods = Array.from(new Set(deduped.map(row => row.sourcePeriod).filter(Boolean)))
     const payload = deduped.map(row => ({
       payee_id: row.matchedPayee?.id ?? null,
-      artist_name: row.matchedPayee ? displayPayeeName(row.matchedPayee) : row.artistName,
-      normalized_artist_name: normalizeName(row.matchedPayee ? displayPayeeName(row.matchedPayee) : row.artistName),
+      artist_name: row.artistName,
+      imported_artist_name: row.artistName,
+      normalized_artist_name: row.normalizedName,
       email: row.email || row.matchedPayee?.primary_email || null,
       previous_carryover: row.carryover,
     }))
@@ -591,7 +683,16 @@ export default function EddyMasterRunPage() {
                     <FragmentRow key={artist.id}>
                       <tr>
                         <td><button className="btn-icon" onClick={() => expandArtist(artist)}>{expandedArtistId === artist.id ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</button></td>
-                        <td><div className="font-medium">{artist.artist_name}</div>{artist.payee_id && <div className="text-[11px] text-ops-muted">Matched payee</div>}</td>
+                        <td>
+                          <div className="font-medium">{artist.payee ? displayPayeeName(artist.payee) : artist.artist_name}</div>
+                          {artist.payee ? (
+                            <div className="text-[11px] text-ops-muted">
+                              Eddy name: {artist.imported_artist_name || artist.artist_name}
+                            </div>
+                          ) : (
+                            <div className="mt-1"><span className="badge-warning">Unmatched payee</span></div>
+                          )}
+                        </td>
                         <td className={artist.email ? '' : 'text-red-400'}>{artist.email || 'Missing'}</td>
                         <td className="text-right font-mono">{artist.statements.length}</td>
                         <td className="text-right font-mono">{formatMoney(artistTotal(artist), currency)}</td>
@@ -599,6 +700,7 @@ export default function EddyMasterRunPage() {
                         <td className="text-right font-mono font-semibold">{formatMoney(amountDue(artist), currency)}</td>
                         <td>{statusBadge(artist.status)}</td>
                         <td><div className="flex gap-1">
+                          {!artist.payee_id && <button className="btn-secondary btn-sm" onClick={() => openArtistPayeeMatch(artist)}><Search size={12} /> Match Payee</button>}
                           <button className="btn-secondary btn-sm" onClick={() => openEmail(artist)}><Mail size={12} /> Prepare Email</button>
                           <select className="ops-select !w-auto !py-1 text-xs" value={artist.status} onChange={event => void setStatus(artist, event.target.value as EddyMasterRunStatus)}>
                             {STATUS_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
@@ -672,7 +774,52 @@ export default function EddyMasterRunPage() {
           {importStep === 'map' && <div className="space-y-3"><div className="text-sm text-ops-muted">{importFileName} · {importRows.length} rows</div>{([
             ['artist', 'Artist / Payee Name', true], ['carryover', 'Previous Carryover', true], ['email', 'Email', false], ['sourcePeriod', 'Source Statement Period', false],
           ] as const).map(([key, label, required]) => <div key={key} className="grid grid-cols-[220px_1fr] gap-3 items-center"><label className="text-sm">{label}{required && <span className="text-red-400"> *</span>}</label><select className="ops-select" value={importMapping[key]} onChange={event => setImportMapping(value => ({ ...value, [key]: event.target.value }))}><option value="">Not mapped</option>{importHeaders.map(header => <option key={header} value={header}>{header}</option>)}</select></div>)}<div className="flex justify-between"><button className="btn-secondary" onClick={() => setImportStep('upload')}>Back</button><button className="btn-primary" onClick={buildImportPreview}>Preview Import</button></div></div>}
-          {importStep === 'preview' && <div className="space-y-3"><div className="max-h-[420px] overflow-auto rounded border" style={{ borderColor: 'var(--ops-border)' }}><table className="ops-table"><thead><tr><th>Row</th><th>Artist</th><th>Payee Match</th><th>Source Period</th><th className="text-right">Previous Carryover</th><th>Check</th></tr></thead><tbody>{importPreview.map(row => <tr key={row.rowNumber}><td>{row.rowNumber}</td><td>{row.artistName || '—'}</td><td>{row.matchedPayee ? displayPayeeName(row.matchedPayee) : <span className="text-ops-muted">Manual artist</span>}</td><td>{row.sourcePeriod || '—'}</td><td className="text-right font-mono">{row.carryover === null ? '—' : formatMoney(row.carryover, currency)}</td><td>{row.issue ? <span className="text-red-400">{row.issue}</span> : <span className="text-green-500">Ready</span>}</td></tr>)}</tbody></table></div><div className="flex justify-between"><button className="btn-secondary" onClick={() => setImportStep('map')}>Back</button><button className="btn-primary" disabled={saving || importPreview.every(row => row.issue)} onClick={() => void commitImport()}><Upload size={13} /> Import Valid Rows</button></div></div>}
+          {importStep === 'preview' && <div className="space-y-3"><div className="max-h-[420px] overflow-auto rounded border" style={{ borderColor: 'var(--ops-border)' }}><table className="ops-table"><thead><tr><th>Row</th><th>Imported Eddy Artist</th><th>Payee Match</th><th>Source Period</th><th className="text-right">Previous Carryover</th><th>Check</th></tr></thead><tbody>{importPreview.map(row => <tr key={row.rowNumber}><td>{row.rowNumber}</td><td>{row.artistName || '—'}</td><td>{row.matchedPayee ? <div><div className="font-medium">{displayPayeeName(row.matchedPayee)}</div><div className="text-[11px] text-ops-muted">{row.matchMethod === 'manual' ? 'Manually matched' : 'Automatically matched'}</div></div> : <div className="flex items-center gap-2"><span className="badge-warning">Unmatched</span>{row.artistName && <button className="btn-secondary btn-sm" onClick={() => openPreviewPayeeMatch(row)}><Search size={12} /> Find Payee</button>}</div>}</td><td>{row.sourcePeriod || '—'}</td><td className="text-right font-mono">{row.carryover === null ? '—' : formatMoney(row.carryover, currency)}</td><td>{row.issue || row.duplicateIssue ? <span className="text-red-400">{row.issue || row.duplicateIssue}</span> : <span className="text-green-500">Ready</span>}</td></tr>)}</tbody></table></div><div className="flex justify-between"><button className="btn-secondary" onClick={() => setImportStep('map')}>Back</button><button className="btn-primary" disabled={saving || importPreview.every(row => row.issue || row.duplicateIssue)} onClick={() => void commitImport()}><Upload size={13} /> Import Valid Rows</button></div></div>}
+        </div>
+      </Modal>}
+
+      {payeeMatchTarget && <Modal title="Match Existing Payee" wide onClose={closePayeeMatch}>
+        <div className="space-y-4">
+          <Alert type="info">
+            Imported Eddy artist: <strong>{payeeMatchTarget.importedName}</strong>. Selecting a payee links this row to an existing record and does not create a new payee.
+          </Alert>
+          {payeeMatchError && <Alert type="error">{payeeMatchError}</Alert>}
+          <div className="ops-field">
+            <label className="ops-label">Search Payees</label>
+            <div className="relative">
+              <Search size={14} className="absolute left-3 top-2.5 text-ops-muted" />
+              <input className="ops-input !pl-9" autoFocus value={payeeSearch} onChange={event => { setPayeeSearch(event.target.value); setSelectedMatchPayeeId(''); setPayeeMatchError(null) }} placeholder="Name, display name, statement name, alias, contact, email or vendor reference" />
+            </div>
+          </div>
+          <div className="max-h-[400px] overflow-auto rounded border" style={{ borderColor: 'var(--ops-border)' }}>
+            {payeeSearchResults.length === 0 ? <div className="p-6 text-center text-sm text-ops-muted">No existing payees match this search.</div> : payeeSearchResults.map(result => {
+              const previewDuplicate = payeeMatchTarget.kind === 'preview'
+                ? importPreview.find(row => row.rowNumber !== payeeMatchTarget.rowNumber && row.matchedPayee?.id === result.payee.id)
+                : null
+              const artistDuplicate = payeeMatchTarget.kind === 'artist'
+                ? findDuplicateEddyRunPayee(artists, result.payee.id, payeeMatchTarget.artistId)
+                : null
+              const existingRunArtist = payeeMatchTarget.kind === 'preview'
+                ? artists.find(artist => artist.payee_id === result.payee.id)
+                : null
+              const blocked = Boolean(previewDuplicate || artistDuplicate || existingRunArtist)
+              return <button key={result.payee.id} type="button" disabled={blocked} onClick={() => { setSelectedMatchPayeeId(result.payee.id); setPayeeMatchError(null) }} className="w-full text-left p-3 border-b last:border-b-0 transition-colors disabled:opacity-50" style={{ borderColor: 'var(--ops-border)', background: selectedMatchPayeeId === result.payee.id ? 'var(--sidebar-active-bg)' : 'var(--ops-surface)' }}>
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="font-semibold">{displayPayeeName(result.payee)}</div>
+                    <div className="text-xs text-ops-muted">Legal/internal: {result.payee.payee_name}</div>
+                    <div className="text-xs text-ops-muted">{result.payee.primary_contact_name || 'No contact name'} · {result.payee.primary_email || 'No email'} · {result.payee.currency}</div>
+                    {result.payee.performer_name && <div className="text-xs text-ops-muted">Performer: {result.payee.performer_name}</div>}
+                    {result.aliases.length > 0 && <div className="text-xs text-ops-muted">Aliases: {result.aliases.join(', ')}</div>}
+                  </div>
+                  <div className="text-right text-xs">
+                    {blocked ? <span className="text-red-400">Already matched in this run</span> : selectedMatchPayeeId === result.payee.id ? <span className="text-blue-500 font-semibold">Selected</span> : null}
+                  </div>
+                </div>
+              </button>
+            })}
+          </div>
+          <div className="flex justify-end gap-2"><button className="btn-secondary" onClick={closePayeeMatch}>Cancel</button><button className="btn-primary" disabled={saving || !selectedMatchPayeeId} onClick={() => void confirmPayeeMatch()}>Confirm Match</button></div>
         </div>
       </Modal>}
     </div>
