@@ -100,12 +100,13 @@ function eddyOpeningCarryover(sourceFinalBalance: number) {
 }
 
 function formatMoney(value: number, currency: string) {
-  return new Intl.NumberFormat('en-GB', {
+  const formatted = new Intl.NumberFormat('en-GB', {
     style: 'currency',
     currency,
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  }).format(value)
+  }).format(Math.abs(value))
+  return value < 0 ? `(${formatted})` : formatted
 }
 
 function displayPayeeName(payee: Payee) {
@@ -900,7 +901,7 @@ export default function EddyMasterRunPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-3 [&_.stat-value]:!whitespace-nowrap [&_.stat-value]:!break-normal">
             <StatCard label="Artists" value={summary.artistCount} />
             <StatCard label="Eddy Statements" value={summary.statementCount} />
             <StatCard label="Eddy Value" value={formatMoney(summary.statementValue, currency)} color="green" />
@@ -915,7 +916,7 @@ export default function EddyMasterRunPage() {
             {artists.length === 0 ? (
               <EmptyState title="No artists in this run" description="Import previous carryovers or add an artist manually." icon={FileSpreadsheet} />
             ) : (
-              <table className="ops-table">
+              <table className="ops-table min-w-max whitespace-nowrap">
                 <thead><tr>
                   <th className="w-8"></th><th>Artist</th><th>Email</th><th className="text-right">Eddy Statements</th>
                   <th className="text-right">Eddy Total</th><th className="text-right">Eddy Opening Carryover</th>
@@ -937,22 +938,22 @@ export default function EddyMasterRunPage() {
                           )}
                         </td>
                         <td className={artist.email ? '' : 'text-red-400'}>{artist.email || 'Missing'}</td>
-                        <td className="text-right font-mono">{artist.statements.length}</td>
-                        <td className="text-right font-mono">{formatMoney(artistTotal(artist), currency)}</td>
-                        <td className="text-right font-mono">
+                        <td className="text-right font-mono whitespace-nowrap">{artist.statements.length}</td>
+                        <td className="text-right font-mono whitespace-nowrap">{formatMoney(artistTotal(artist), currency)}</td>
+                        <td className="text-right font-mono whitespace-nowrap">
                           <div>{formatMoney(Number(artist.previous_carryover ?? 0), currency)}</div>
                           {artist.imported_final_balance !== null && artist.imported_final_balance > 100 && (
                             <div className="text-[11px] text-ops-muted">Source final {formatMoney(artist.imported_final_balance, currency)} · paid previously</div>
                           )}
                         </td>
-                        <td className="text-right font-mono font-semibold">{formatMoney(amountDue(artist), currency)}</td>
-                        <td>{statusBadge(artist.status)}</td>
-                        <td><div className="flex gap-1">
-                          {!artist.payee_id && <button className="btn-secondary btn-sm" onClick={() => openArtistPayeeMatch(artist)}><Search size={12} /> Match Payee</button>}
+                        <td className="text-right font-mono font-semibold whitespace-nowrap">{formatMoney(amountDue(artist), currency)}</td>
+                        <td className="whitespace-nowrap">{statusBadge(artist.status)}</td>
+                        <td><div className="flex flex-nowrap gap-1 min-w-max">
                           <button className="btn-secondary btn-sm" onClick={() => openEmail(artist)}><Mail size={12} /> Prepare Email</button>
                           <select className="ops-select !w-auto !py-1 text-xs" value={artist.status} onChange={event => void setStatus(artist, event.target.value as EddyMasterRunStatus)}>
                             {STATUS_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
                           </select>
+                          {!artist.payee_id && <button className="btn-secondary btn-sm" onClick={() => openArtistPayeeMatch(artist)}><Search size={12} /> Match Payee</button>}
                         </div></td>
                       </tr>
                       {expandedArtistId === artist.id && (
