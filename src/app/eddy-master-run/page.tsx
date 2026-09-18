@@ -44,9 +44,33 @@ type ImportPreviewRow = {
   duplicateIssue: string | null
 }
 
+type EddyStatementCsvRow = {
+  rowNumber: number
+  periodRef: string
+  contractName: string
+  contractId: string
+  payeeName: string
+  eddyPayeeId: string
+  statementId: string
+  finalDue: number | null
+}
+
+type EddyStatementImportGroup = {
+  key: string
+  payeeName: string
+  normalizedPayeeName: string
+  eddyPayeeId: string
+  matchedPayee: Payee | null
+  matchMethod: 'automatic' | 'manual' | null
+  existingArtist: ArtistRow | null
+  statements: EddyStatementCsvRow[]
+  issue: string | null
+}
+
 type PayeeMatchTarget =
   | { kind: 'preview'; rowNumber: number; importedName: string }
   | { kind: 'artist'; artistId: string; importedName: string }
+  | { kind: 'statementPreview'; groupKey: string; importedName: string }
 
 const STATUS_OPTIONS: { value: EddyMasterRunStatus; label: string }[] = [
   { value: 'to_prepare', label: 'To Prepare' },
@@ -54,6 +78,8 @@ const STATUS_OPTIONS: { value: EddyMasterRunStatus; label: string }[] = [
   { value: 'sent', label: 'Sent' },
   { value: 'carry_forward', label: 'Carry Forward' },
 ]
+
+const EDDY_PAYMENT_THRESHOLD = 100
 
 function cleanText(value: unknown) {
   return String(value ?? '').trim().replace(/\s+/g, ' ')
@@ -67,6 +93,10 @@ function parseAmount(value: unknown): number | null {
   const numeric = Number(raw.replace(/[£€$(),\s]/g, '').replace(/,/g, ''))
   if (!Number.isFinite(numeric)) return null
   return negative ? -numeric : numeric
+}
+
+function eddyOpeningCarryover(sourceFinalBalance: number) {
+  return sourceFinalBalance > EDDY_PAYMENT_THRESHOLD ? 0 : sourceFinalBalance
 }
 
 function formatMoney(value: number, currency: string) {
@@ -127,6 +157,15 @@ export default function EddyMasterRunPage() {
   const [importRows, setImportRows] = useState<Record<string, unknown>[]>([])
   const [importMapping, setImportMapping] = useState<ImportMapping>({ artist: '', carryover: '', email: '', sourcePeriod: '' })
   const [importPreview, setImportPreview] = useState<ImportPreviewRow[]>([])
+  const statementFileRef = useRef<HTMLInputElement>(null)
+  const [showStatementImport, setShowStatementImport] = useState(false)
+  const [statementImportStep, setStatementImportStep] = useState<'upload' | 'period' | 'preview'>('upload')
+  const [statementImportFileName, setStatementImportFileName] = useState('')
+  const [statementCsvRows, setStatementCsvRows] = useState<EddyStatementCsvRow[]>([])
+  const [statementPeriods, setStatementPeriods] = useState<{ periodRef: string; rowCount: number }[]>([])
+  const [selectedStatementPeriod, setSelectedStatementPeriod] = useState('')
+  const [statementImportGroups, setStatementImportGroups] = useState<EddyStatementImportGroup[]>([])
+  const [expandedStatementGroup, setExpandedStatementGroup] = useState<string | null>(null)
   const [payeeMatchTarget, setPayeeMatchTarget] = useState<PayeeMatchTarget | null>(null)
   const [payeeSearch, setPayeeSearch] = useState('')
   const [selectedMatchPayeeId, setSelectedMatchPayeeId] = useState('')
@@ -192,6 +231,9 @@ export default function EddyMasterRunPage() {
     setArtists(base.map(artist => ({
       ...artist,
       previous_carryover: Number(artist.previous_carryover ?? 0),
+      imported_final_balance: artist.imported_final_balance === null
+        ? null
+        : Number(artist.imported_final_balance),
       statements: statements.filter(statement => statement.run_artist_id === artist.id).map(statement => ({
         ...statement,
         amount: Number(statement.amount ?? 0),
@@ -252,7 +294,7 @@ export default function EddyMasterRunPage() {
     if (!latest) return null
     const { data: entries } = await supabase.from('eddy_master_statements').select('amount').eq('run_artist_id', latest.id)
     const total = (entries ?? []).reduce((sum, entry) => sum + Number(entry.amount ?? 0), Number(latest.previous_carryover ?? 0))
-    return { amount: total, sourceArtistId: latest.id }
+    return { amount: eddyOpeningCarryover(total), sourceArtistId: latest.id }
   }
 
   async function selectPayeeForArtist(payeeId: string) {
@@ -438,6 +480,33 @@ export default function EddyMasterRunPage() {
     return next
   }
 
+  function resolveStatementRunArtist(payeeName: string, matchedPayee: Payee | null) {
+    const normalized = normalizeEddyPayeeName(payeeName)
+    const byPayee = matchedPayee ? artists.find(artist => artist.payee_id === matchedPayee.id) ?? null : null
+    const byName = artists.find(artist =>
+      artist.normalized_artist_name === normalized
+      || normalizeEddyPayeeName(artist.imported_artist_name || artist.artist_name) === normalized
+    ) ?? null
+    if (byPayee && byName && byPayee.id !== byName.id) {
+      return {
+        artist: null,
+        issue: 'Matched payee and Eddy payee name already exist as separate artists in this run',
+      }
+    }
+    return { artist: byPayee || byName, issue: null }
+  }
+
+  function applyStatementGroupMatch(group: EddyStatementImportGroup, matchedPayee: Payee | null, method: 'automatic' | 'manual' | null) {
+    const resolved = resolveStatementRunArtist(group.payeeName, matchedPayee)
+    return {
+      ...group,
+      matchedPayee,
+      matchMethod: method,
+      existingArtist: resolved.artist,
+      issue: resolved.issue,
+    }
+  }
+
   function openPreviewPayeeMatch(row: ImportPreviewRow) {
     setPayeeMatchTarget({ kind: 'preview', rowNumber: row.rowNumber, importedName: row.artistName })
     setPayeeSearch(row.artistName)
@@ -452,6 +521,13 @@ export default function EddyMasterRunPage() {
       importedName: artist.imported_artist_name || artist.artist_name,
     })
     setPayeeSearch(artist.imported_artist_name || artist.artist_name)
+    setSelectedMatchPayeeId('')
+    setPayeeMatchError(null)
+  }
+
+  function openStatementPayeeMatch(group: EddyStatementImportGroup) {
+    setPayeeMatchTarget({ kind: 'statementPreview', groupKey: group.key, importedName: group.payeeName })
+    setPayeeSearch(group.payeeName)
     setSelectedMatchPayeeId('')
     setPayeeMatchError(null)
   }
@@ -481,6 +557,26 @@ export default function EddyMasterRunPage() {
           ? { ...row, matchedPayee: selectedPayee, matchMethod: 'manual' }
           : row
       )))
+      closePayeeMatch()
+      return
+    }
+
+    if (payeeMatchTarget.kind === 'statementPreview') {
+      const duplicateGroup = statementImportGroups.find(group =>
+        group.key !== payeeMatchTarget.groupKey && group.matchedPayee?.id === selectedPayee.id
+      )
+      if (duplicateGroup) {
+        setPayeeMatchError(`This payee is already matched to Eddy payee ${duplicateGroup.payeeName}.`)
+        return
+      }
+      const targetGroup = statementImportGroups.find(group => group.key === payeeMatchTarget.groupKey)
+      if (!targetGroup) return
+      const updatedGroup = applyStatementGroupMatch(targetGroup, selectedPayee, 'manual')
+      if (updatedGroup.issue) {
+        setPayeeMatchError(updatedGroup.issue)
+        return
+      }
+      setStatementImportGroups(current => current.map(group => group.key === targetGroup.key ? updatedGroup : group))
       closePayeeMatch()
       return
     }
@@ -619,10 +715,156 @@ export default function EddyMasterRunPage() {
     if (fileRef.current) fileRef.current.value = ''
   }
 
+  function canonicalPeriod(value: string) {
+    const normalized = value.trim().toUpperCase()
+    const halfFirst = normalized.match(/^(H[12])\s*[- ]\s*(\d{4})$/)
+    if (halfFirst) return `${halfFirst[2]}-${halfFirst[1]}`
+    const yearFirst = normalized.match(/^(\d{4})\s*[- ]\s*(H[12])$/)
+    if (yearFirst) return `${yearFirst[1]}-${yearFirst[2]}`
+    return normalized
+  }
+
+  async function handleEddyStatementFile(file: File) {
+    setError(null)
+    const parsed = Papa.parse<Record<string, string>>(await file.text(), {
+      header: true,
+      skipEmptyLines: true,
+    })
+    const requiredHeaders = ['Period Ref', 'Contract Name', 'Contract ID', 'Payee Name', 'Payee ID', 'Statement ID', 'Final Due']
+    const missingHeaders = requiredHeaders.filter(header => !parsed.meta.fields?.includes(header))
+    if (missingHeaders.length > 0) {
+      setError(`This is not a standard Eddy Statements List CSV. Missing: ${missingHeaders.join(', ')}.`)
+      return
+    }
+    const rows = parsed.data.map((row, index): EddyStatementCsvRow => ({
+      rowNumber: index + 2,
+      periodRef: cleanText(row['Period Ref']),
+      contractName: cleanText(row['Contract Name']),
+      contractId: cleanText(row['Contract ID']),
+      payeeName: cleanText(row['Payee Name']),
+      eddyPayeeId: cleanText(row['Payee ID']),
+      statementId: cleanText(row['Statement ID']),
+      finalDue: parseAmount(row['Final Due']),
+    }))
+    const periodCounts = rows.reduce<Record<string, number>>((acc, row) => {
+      if (row.periodRef) acc[row.periodRef] = (acc[row.periodRef] ?? 0) + 1
+      return acc
+    }, {})
+    const foundPeriods = Object.entries(periodCounts).map(([periodRef, rowCount]) => ({ periodRef, rowCount }))
+    const matchingPeriod = foundPeriods.find(period => canonicalPeriod(period.periodRef) === canonicalPeriod(selectedRun?.statement_period.label ?? ''))
+    setStatementImportFileName(file.name)
+    setStatementCsvRows(rows)
+    setStatementPeriods(foundPeriods)
+    setSelectedStatementPeriod(matchingPeriod?.periodRef ?? '')
+    setStatementImportStep('period')
+  }
+
+  function buildEddyStatementPreview() {
+    if (!selectedStatementPeriod) {
+      setError('Select an Eddy Period Ref before continuing.')
+      return
+    }
+    const selectedRows = statementCsvRows.filter(row => row.periodRef === selectedStatementPeriod)
+    const groups = new Map<string, EddyStatementCsvRow[]>()
+    selectedRows.forEach(row => {
+      const key = row.eddyPayeeId ? `eddy:${row.eddyPayeeId}` : `name:${normalizeEddyPayeeName(row.payeeName)}`
+      groups.set(key, [...(groups.get(key) ?? []), row])
+    })
+    const duplicateStatementIds = new Set<string>()
+    const seenStatementIds = new Set<string>()
+    selectedRows.forEach(row => {
+      if (seenStatementIds.has(row.statementId)) duplicateStatementIds.add(row.statementId)
+      seenStatementIds.add(row.statementId)
+    })
+    const previewGroups = Array.from(groups.entries()).map(([key, rows]): EddyStatementImportGroup => {
+      const first = rows[0]
+      const automaticMatch = automaticallyMatchEddyPayee(first.payeeName, payees, aliases)
+      const invalidRow = rows.find(row => !row.payeeName || !row.contractName || !row.contractId || !row.statementId || row.finalDue === null)
+      const duplicateId = rows.find(row => duplicateStatementIds.has(row.statementId))
+      const base: EddyStatementImportGroup = {
+        key,
+        payeeName: first.payeeName,
+        normalizedPayeeName: normalizeEddyPayeeName(first.payeeName),
+        eddyPayeeId: first.eddyPayeeId,
+        matchedPayee: automaticMatch,
+        matchMethod: automaticMatch ? 'automatic' : null,
+        existingArtist: null,
+        statements: rows,
+        issue: invalidRow
+          ? `Row ${invalidRow.rowNumber} is missing a required value`
+          : duplicateId
+            ? `Statement ID ${duplicateId.statementId} is duplicated in the selected period`
+            : null,
+      }
+      if (base.issue) return base
+      return applyStatementGroupMatch(base, automaticMatch, automaticMatch ? 'automatic' : null)
+    }).sort((a, b) => a.payeeName.localeCompare(b.payeeName))
+    setStatementImportGroups(previewGroups)
+    setExpandedStatementGroup(null)
+    setStatementImportStep('preview')
+  }
+
+  async function commitEddyStatementImport() {
+    if (!selectedRun || !selectedStatementPeriod) return
+    const issue = statementImportGroups.find(group => group.issue)
+    if (issue) {
+      setError(`Resolve the preview issue for ${issue.payeeName} before importing.`)
+      return
+    }
+    const payload = statementImportGroups.flatMap(group => group.statements.map(statement => ({
+      payee_id: group.matchedPayee?.id ?? null,
+      payee_name: group.payeeName,
+      normalized_payee_name: group.normalizedPayeeName,
+      email: group.matchedPayee?.primary_email ?? group.existingArtist?.email ?? null,
+      eddy_payee_id: group.eddyPayeeId,
+      period_ref: statement.periodRef,
+      contract_name: statement.contractName,
+      contract_id: statement.contractId,
+      statement_id: statement.statementId,
+      final_due: statement.finalDue,
+    })))
+    setSaving(true)
+    setError(null)
+    const { error: importError } = await supabase.rpc('commit_eddy_master_statement_import', {
+      p_run_id: selectedRun.id,
+      p_file_name: statementImportFileName,
+      p_period_ref: selectedStatementPeriod,
+      p_rows: payload,
+    })
+    setSaving(false)
+    if (importError) {
+      setError(importError.message)
+      return
+    }
+    setNotice(`Imported ${payload.length} Eddy statement${payload.length === 1 ? '' : 's'} for ${selectedStatementPeriod}. Existing Statement IDs were updated without duplication.`)
+    closeStatementImport()
+    await loadArtists(selectedRun.id)
+  }
+
+  function closeStatementImport() {
+    setShowStatementImport(false)
+    setStatementImportStep('upload')
+    setStatementImportFileName('')
+    setStatementCsvRows([])
+    setStatementPeriods([])
+    setSelectedStatementPeriod('')
+    setStatementImportGroups([])
+    setExpandedStatementGroup(null)
+    if (statementFileRef.current) statementFileRef.current.value = ''
+  }
+
   if (loading) return <div className="flex justify-center py-16"><LoadingSpinner size={28} /></div>
 
   const currency = selectedRun?.currency ?? 'GBP'
   const availablePeriods = periods.filter(period => !runs.some(run => run.statement_period_id === period.id))
+  const selectedStatementRows = statementCsvRows.filter(row => row.periodRef === selectedStatementPeriod)
+  const statementPreviewTotal = statementImportGroups.reduce(
+    (sum, group) => sum + group.statements.reduce((groupSum, statement) => groupSum + Number(statement.finalDue ?? 0), 0),
+    0,
+  )
+  const importedStatementIds = new Set(
+    artists.flatMap(artist => artist.statements.map(statement => statement.eddy_statement_id).filter(Boolean)),
+  )
 
   return (
     <div className="space-y-4">
@@ -652,6 +894,7 @@ export default function EddyMasterRunPage() {
               </select>
             </div>
             <div className="ml-auto flex gap-2">
+              <button className="btn-secondary" onClick={() => setShowStatementImport(true)}><FileSpreadsheet size={14} /> Import Eddy Statements</button>
               <button className="btn-secondary" onClick={() => setShowImport(true)}><Upload size={14} /> Import Carryover</button>
               <button className="btn-primary" onClick={() => setShowAddArtist(true)}><Plus size={14} /> Add Artist</button>
             </div>
@@ -661,8 +904,8 @@ export default function EddyMasterRunPage() {
             <StatCard label="Artists" value={summary.artistCount} />
             <StatCard label="Eddy Statements" value={summary.statementCount} />
             <StatCard label="Eddy Value" value={formatMoney(summary.statementValue, currency)} color="green" />
-            <StatCard label="Opening Carryover" value={formatMoney(summary.openingCarryover, currency)} />
-            <StatCard label="Amount Due" value={formatMoney(summary.amountDue, currency)} color="blue" />
+            <StatCard label="Eddy Opening Carryover" value={formatMoney(summary.openingCarryover, currency)} />
+            <StatCard label="Eddy Amount Due" value={formatMoney(summary.amountDue, currency)} color="blue" />
             <StatCard label="Ready" value={summary.ready} color="cyan" />
             <StatCard label="Sent" value={summary.sent} color="green" />
             <StatCard label="Carry Forward" value={summary.carryForward} color="amber" />
@@ -675,7 +918,7 @@ export default function EddyMasterRunPage() {
               <table className="ops-table">
                 <thead><tr>
                   <th className="w-8"></th><th>Artist</th><th>Email</th><th className="text-right">Eddy Statements</th>
-                  <th className="text-right">Eddy Total</th><th className="text-right">Previous Carryover</th>
+                  <th className="text-right">Eddy Total</th><th className="text-right">Eddy Opening Carryover</th>
                   <th className="text-right">Amount Due</th><th>Status</th><th>Actions</th>
                 </tr></thead>
                 <tbody>
@@ -696,7 +939,12 @@ export default function EddyMasterRunPage() {
                         <td className={artist.email ? '' : 'text-red-400'}>{artist.email || 'Missing'}</td>
                         <td className="text-right font-mono">{artist.statements.length}</td>
                         <td className="text-right font-mono">{formatMoney(artistTotal(artist), currency)}</td>
-                        <td className="text-right font-mono">{formatMoney(Number(artist.previous_carryover ?? 0), currency)}</td>
+                        <td className="text-right font-mono">
+                          <div>{formatMoney(Number(artist.previous_carryover ?? 0), currency)}</div>
+                          {artist.imported_final_balance !== null && artist.imported_final_balance > 100 && (
+                            <div className="text-[11px] text-ops-muted">Source final {formatMoney(artist.imported_final_balance, currency)} · paid previously</div>
+                          )}
+                        </td>
                         <td className="text-right font-mono font-semibold">{formatMoney(amountDue(artist), currency)}</td>
                         <td>{statusBadge(artist.status)}</td>
                         <td><div className="flex gap-1">
@@ -712,13 +960,13 @@ export default function EddyMasterRunPage() {
                           <div className="grid md:grid-cols-4 gap-3 items-end">
                             <div className="ops-field"><label className="ops-label">Artist</label><input className="ops-input" value={artistEdit.name} onChange={event => setArtistEdit(value => ({ ...value, name: event.target.value }))} /></div>
                             <div className="ops-field"><label className="ops-label">Email</label><input className="ops-input" type="email" value={artistEdit.email} onChange={event => setArtistEdit(value => ({ ...value, email: event.target.value }))} /></div>
-                            <div className="ops-field"><label className="ops-label">Previous Carryover</label><input className="ops-input font-mono" value={artistEdit.previousCarryover} onChange={event => setArtistEdit(value => ({ ...value, previousCarryover: event.target.value }))} /></div>
+                            <div className="ops-field"><label className="ops-label">Eddy Opening Carryover</label><input className="ops-input font-mono" value={artistEdit.previousCarryover} onChange={event => setArtistEdit(value => ({ ...value, previousCarryover: event.target.value }))} /></div>
                             <div className="flex gap-2"><button className="btn-primary btn-sm" disabled={saving} onClick={() => void saveArtist(artist)}><Save size={12} /> Save Artist</button><button className="btn-danger btn-sm" onClick={() => void deleteArtist(artist)}><Trash2 size={12} /> Remove</button></div>
                           </div>
                           <div>
                             <div className="section-title mb-2">Eddy Statement Entries</div>
                             {artist.statements.length > 0 && <div className="rounded border overflow-hidden mb-3" style={{ borderColor: 'var(--ops-border)' }}><table className="ops-table"><thead><tr><th>Statement / Contract Label</th><th>Filename / Reference</th><th className="text-right">Amount</th><th></th></tr></thead><tbody>
-                              {artist.statements.map(statement => <tr key={statement.id}><td>{statement.statement_label}</td><td className="text-ops-muted">{statement.file_reference || '—'}</td><td className="text-right font-mono">{formatMoney(statement.amount, currency)}</td><td className="text-right"><button className="btn-icon text-red-400" onClick={() => void deleteStatement(statement.id)}><Trash2 size={13} /></button></td></tr>)}
+                              {artist.statements.map(statement => <tr key={statement.id}><td><div>{statement.statement_label}</div>{statement.eddy_statement_id && <div className="text-[11px] text-ops-muted font-mono">Contract {statement.eddy_contract_id || '—'} · Statement {statement.eddy_statement_id}</div>}</td><td className="text-ops-muted">{statement.file_reference || '—'}</td><td className="text-right font-mono">{formatMoney(statement.amount, currency)}</td><td className="text-right"><button className="btn-icon text-red-400" onClick={() => void deleteStatement(statement.id)}><Trash2 size={13} /></button></td></tr>)}
                             </tbody></table></div>}
                             <div className="grid md:grid-cols-[1fr_160px_1fr_auto] gap-2 items-end">
                               <div className="ops-field"><label className="ops-label">Statement / Contract Label</label><input className="ops-input" value={statementDraft.label} onChange={event => setStatementDraft(value => ({ ...value, label: event.target.value }))} placeholder="e.g. Artist Services Agreement" /></div>
@@ -767,14 +1015,37 @@ export default function EddyMasterRunPage() {
         </div>
       </Modal>}
 
+      {showStatementImport && <Modal title="Import Eddy Statements" wide onClose={closeStatementImport}>
+        <div className="space-y-4">
+          <div className="flex gap-2 text-xs text-ops-muted"><span className={statementImportStep === 'upload' ? 'text-blue-500 font-semibold' : ''}>1. Upload</span><span>›</span><span className={statementImportStep === 'period' ? 'text-blue-500 font-semibold' : ''}>2. Select Period</span><span>›</span><span className={statementImportStep === 'preview' ? 'text-blue-500 font-semibold' : ''}>3. Preview</span></div>
+          {statementImportStep === 'upload' && <div className="space-y-3">
+            <Alert type="info">Upload the standard Eddy Statements List CSV. You will choose one Period Ref before any rows are previewed or imported.</Alert>
+            <button className="w-full border-2 border-dashed rounded-lg p-10 text-center hover:border-blue-500" style={{ borderColor: 'var(--ops-border)' }} onClick={() => statementFileRef.current?.click()}><FileSpreadsheet size={28} className="mx-auto mb-2 text-ops-muted" /><span>Choose Eddy Statements List CSV</span></button>
+            <input ref={statementFileRef} type="file" accept=".csv,text/csv" className="hidden" onChange={event => { const file = event.target.files?.[0]; if (file) void handleEddyStatementFile(file) }} />
+          </div>}
+          {statementImportStep === 'period' && <div className="space-y-4">
+            <div className="rounded border p-3 text-sm" style={{ borderColor: 'var(--ops-border)', background: 'var(--ops-surface-2)' }}><div><span className="text-ops-muted">File:</span> {statementImportFileName}</div><div><span className="text-ops-muted">Current Eddy Master Run:</span> {selectedRun?.statement_period.label}</div><div><span className="text-ops-muted">Periods found:</span> {statementPeriods.length}</div></div>
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2">{statementPeriods.map(period => <button key={period.periodRef} type="button" onClick={() => setSelectedStatementPeriod(period.periodRef)} className="rounded border p-3 text-left transition-colors" style={{ borderColor: selectedStatementPeriod === period.periodRef ? 'var(--accent-blue)' : 'var(--ops-border)', background: selectedStatementPeriod === period.periodRef ? 'var(--sidebar-active-bg)' : 'var(--ops-surface)' }}><div className="font-semibold">{period.periodRef}</div><div className="text-xs text-ops-muted">{period.rowCount} statement row{period.rowCount === 1 ? '' : 's'}</div></button>)}</div>
+            {selectedStatementPeriod && <Alert type="warning">Only the <strong>{selectedStatementPeriod}</strong> rows will proceed. The other {statementCsvRows.length - selectedStatementRows.length} rows in this file will not be imported.</Alert>}
+            <div className="flex justify-between"><button className="btn-secondary" onClick={() => setStatementImportStep('upload')}>Back</button><button className="btn-primary" disabled={!selectedStatementPeriod} onClick={buildEddyStatementPreview}>Preview {selectedStatementPeriod || 'Selected Period'}</button></div>
+          </div>}
+          {statementImportStep === 'preview' && <div className="space-y-4">
+            <div className="grid sm:grid-cols-3 gap-3"><div className="rounded border p-3" style={{ borderColor: 'var(--ops-border)' }}><div className="text-xs text-ops-muted">Selected Eddy Period</div><div className="font-semibold">{selectedStatementPeriod}</div></div><div className="rounded border p-3" style={{ borderColor: 'var(--ops-border)' }}><div className="text-xs text-ops-muted">Statement Rows</div><div className="font-semibold">{selectedStatementRows.length}</div></div><div className="rounded border p-3" style={{ borderColor: 'var(--ops-border)' }}><div className="text-xs text-ops-muted">Final Due Total</div><div className="font-semibold font-mono">{formatMoney(statementPreviewTotal, currency)}</div></div></div>
+            <Alert type="info">Preview grouped into {statementImportGroups.length} artist/payee record{statementImportGroups.length === 1 ? '' : 's'}. Previous Carryover is preserved from the current run and is not taken from this CSV.</Alert>
+            <div className="max-h-[480px] overflow-auto rounded border" style={{ borderColor: 'var(--ops-border)' }}><table className="ops-table"><thead><tr><th className="w-8"></th><th>Eddy Payee Name</th><th>App Payee Match</th><th>Run Artist</th><th className="text-right">Previous Carryover</th><th className="text-right">Statements</th><th className="text-right">Eddy Total</th></tr></thead><tbody>{statementImportGroups.map(group => <FragmentRow key={group.key}><tr><td><button className="btn-icon" onClick={() => setExpandedStatementGroup(current => current === group.key ? null : group.key)}>{expandedStatementGroup === group.key ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button></td><td><div className="font-medium">{group.payeeName}</div><div className="text-[11px] text-ops-muted">Eddy Payee ID: {group.eddyPayeeId || '—'}</div></td><td>{group.matchedPayee ? <div><div>{displayPayeeName(group.matchedPayee)}</div><div className="text-[11px] text-ops-muted">{group.matchMethod === 'manual' ? 'Manually matched' : 'Automatically matched'}</div></div> : <div className="flex items-center gap-2"><span className="badge-warning">Unmatched</span><button className="btn-secondary btn-sm" onClick={() => openStatementPayeeMatch(group)}><Search size={12} /> Find Payee</button></div>}</td><td>{group.issue ? <span className="text-red-400">{group.issue}</span> : group.existingArtist ? <div><span className="badge-info">Existing</span><div className="text-[11px] text-ops-muted mt-1">{group.existingArtist.artist_name}</div></div> : <span className="badge-pending">Will create</span>}</td><td className="text-right font-mono">{formatMoney(Number(group.existingArtist?.previous_carryover ?? 0), currency)}</td><td className="text-right font-mono">{group.statements.length}</td><td className="text-right font-mono font-semibold">{formatMoney(group.statements.reduce((sum, statement) => sum + Number(statement.finalDue ?? 0), 0), currency)}</td></tr>{expandedStatementGroup === group.key && <tr><td colSpan={7} className="!p-0"><div className="p-3" style={{ background: 'var(--ops-surface-2)' }}><table className="ops-table text-xs"><thead><tr><th>Contract Name</th><th>Contract ID</th><th>Statement ID</th><th>Import Status</th><th className="text-right">Final Due</th></tr></thead><tbody>{group.statements.map(statement => <tr key={`${group.key}-${statement.statementId}`}><td>{statement.contractName}</td><td className="font-mono">{statement.contractId}</td><td className="font-mono">{statement.statementId}</td><td>{importedStatementIds.has(statement.statementId) ? <span className="badge-info">Will update</span> : <span className="badge-pending">New</span>}</td><td className="text-right font-mono">{statement.finalDue === null ? '—' : formatMoney(statement.finalDue, currency)}</td></tr>)}</tbody></table></div></td></tr>}</FragmentRow>)}</tbody></table></div>
+            <div className="flex justify-between"><button className="btn-secondary" onClick={() => setStatementImportStep('period')}>Back</button><button className="btn-primary" disabled={saving || statementImportGroups.length === 0 || statementImportGroups.some(group => group.issue)} onClick={() => void commitEddyStatementImport()}><Upload size={13} /> Import {selectedStatementRows.length} Statements</button></div>
+          </div>}
+        </div>
+      </Modal>}
+
       {showImport && <Modal title="Import Previous Carryovers" wide onClose={closeImport}>
         <div className="space-y-4">
           <div className="flex gap-2 text-xs text-ops-muted"><span className={importStep === 'upload' ? 'text-blue-500 font-semibold' : ''}>1. Upload</span><span>›</span><span className={importStep === 'map' ? 'text-blue-500 font-semibold' : ''}>2. Map</span><span>›</span><span className={importStep === 'preview' ? 'text-blue-500 font-semibold' : ''}>3. Preview</span></div>
-          {importStep === 'upload' && <div className="space-y-3"><Alert type="info">CSV and Excel files are supported. Nothing is saved until you review the mapping and commit the preview.</Alert><button className="w-full border-2 border-dashed rounded-lg p-10 text-center hover:border-blue-500" style={{ borderColor: 'var(--ops-border)' }} onClick={() => fileRef.current?.click()}><Upload size={28} className="mx-auto mb-2 text-ops-muted" /><span>Choose carryover CSV or Excel file</span></button><input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={event => { const file = event.target.files?.[0]; if (file) void handleImportFile(file) }} /></div>}
+          {importStep === 'upload' && <div className="space-y-3"><Alert type="info">CSV and Excel files are supported. Source final balances above {formatMoney(EDDY_PAYMENT_THRESHOLD, currency)} are treated as paid and become a zero Eddy opening carryover. Nothing is saved until you review the preview.</Alert><button className="w-full border-2 border-dashed rounded-lg p-10 text-center hover:border-blue-500" style={{ borderColor: 'var(--ops-border)' }} onClick={() => fileRef.current?.click()}><Upload size={28} className="mx-auto mb-2 text-ops-muted" /><span>Choose carryover CSV or Excel file</span></button><input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={event => { const file = event.target.files?.[0]; if (file) void handleImportFile(file) }} /></div>}
           {importStep === 'map' && <div className="space-y-3"><div className="text-sm text-ops-muted">{importFileName} · {importRows.length} rows</div>{([
-            ['artist', 'Artist / Payee Name', true], ['carryover', 'Previous Carryover', true], ['email', 'Email', false], ['sourcePeriod', 'Source Statement Period', false],
+            ['artist', 'Artist / Payee Name', true], ['carryover', 'Prior Final Balance', true], ['email', 'Email', false], ['sourcePeriod', 'Source Statement Period', false],
           ] as const).map(([key, label, required]) => <div key={key} className="grid grid-cols-[220px_1fr] gap-3 items-center"><label className="text-sm">{label}{required && <span className="text-red-400"> *</span>}</label><select className="ops-select" value={importMapping[key]} onChange={event => setImportMapping(value => ({ ...value, [key]: event.target.value }))}><option value="">Not mapped</option>{importHeaders.map(header => <option key={header} value={header}>{header}</option>)}</select></div>)}<div className="flex justify-between"><button className="btn-secondary" onClick={() => setImportStep('upload')}>Back</button><button className="btn-primary" onClick={buildImportPreview}>Preview Import</button></div></div>}
-          {importStep === 'preview' && <div className="space-y-3"><div className="max-h-[420px] overflow-auto rounded border" style={{ borderColor: 'var(--ops-border)' }}><table className="ops-table"><thead><tr><th>Row</th><th>Imported Eddy Artist</th><th>Payee Match</th><th>Source Period</th><th className="text-right">Previous Carryover</th><th>Check</th></tr></thead><tbody>{importPreview.map(row => <tr key={row.rowNumber}><td>{row.rowNumber}</td><td>{row.artistName || '—'}</td><td>{row.matchedPayee ? <div><div className="font-medium">{displayPayeeName(row.matchedPayee)}</div><div className="text-[11px] text-ops-muted">{row.matchMethod === 'manual' ? 'Manually matched' : 'Automatically matched'}</div></div> : <div className="flex items-center gap-2"><span className="badge-warning">Unmatched</span>{row.artistName && <button className="btn-secondary btn-sm" onClick={() => openPreviewPayeeMatch(row)}><Search size={12} /> Find Payee</button>}</div>}</td><td>{row.sourcePeriod || '—'}</td><td className="text-right font-mono">{row.carryover === null ? '—' : formatMoney(row.carryover, currency)}</td><td>{row.issue || row.duplicateIssue ? <span className="text-red-400">{row.issue || row.duplicateIssue}</span> : <span className="text-green-500">Ready</span>}</td></tr>)}</tbody></table></div><div className="flex justify-between"><button className="btn-secondary" onClick={() => setImportStep('map')}>Back</button><button className="btn-primary" disabled={saving || importPreview.every(row => row.issue || row.duplicateIssue)} onClick={() => void commitImport()}><Upload size={13} /> Import Valid Rows</button></div></div>}
+          {importStep === 'preview' && <div className="space-y-3"><div className="max-h-[420px] overflow-auto rounded border" style={{ borderColor: 'var(--ops-border)' }}><table className="ops-table"><thead><tr><th>Row</th><th>Imported Eddy Artist</th><th>Payee Match</th><th>Source Period</th><th className="text-right">Source Final Balance</th><th className="text-right">Eddy Opening Carryover</th><th>Check</th></tr></thead><tbody>{importPreview.map(row => <tr key={row.rowNumber}><td>{row.rowNumber}</td><td>{row.artistName || '—'}</td><td>{row.matchedPayee ? <div><div className="font-medium">{displayPayeeName(row.matchedPayee)}</div><div className="text-[11px] text-ops-muted">{row.matchMethod === 'manual' ? 'Manually matched' : 'Automatically matched'}</div></div> : <div className="flex items-center gap-2"><span className="badge-warning">Unmatched</span>{row.artistName && <button className="btn-secondary btn-sm" onClick={() => openPreviewPayeeMatch(row)}><Search size={12} /> Find Payee</button>}</div>}</td><td>{row.sourcePeriod || '—'}</td><td className="text-right font-mono">{row.carryover === null ? '—' : formatMoney(row.carryover, currency)}</td><td className="text-right font-mono">{row.carryover === null ? '—' : formatMoney(eddyOpeningCarryover(row.carryover), currency)}</td><td>{row.issue || row.duplicateIssue ? <span className="text-red-400">{row.issue || row.duplicateIssue}</span> : row.carryover !== null && row.carryover > EDDY_PAYMENT_THRESHOLD ? <span className="text-amber-500">Paid previously · reset to zero</span> : <span className="text-green-500">Carry forward</span>}</td></tr>)}</tbody></table></div><div className="flex justify-between"><button className="btn-secondary" onClick={() => setImportStep('map')}>Back</button><button className="btn-primary" disabled={saving || importPreview.every(row => row.issue || row.duplicateIssue)} onClick={() => void commitImport()}><Upload size={13} /> Import Valid Rows</button></div></div>}
         </div>
       </Modal>}
 
@@ -802,7 +1073,13 @@ export default function EddyMasterRunPage() {
               const existingRunArtist = payeeMatchTarget.kind === 'preview'
                 ? artists.find(artist => artist.payee_id === result.payee.id)
                 : null
-              const blocked = Boolean(previewDuplicate || artistDuplicate || existingRunArtist)
+              const statementDuplicate = payeeMatchTarget.kind === 'statementPreview'
+                ? statementImportGroups.find(group => group.key !== payeeMatchTarget.groupKey && group.matchedPayee?.id === result.payee.id)
+                : null
+              const statementExistingArtist = payeeMatchTarget.kind === 'statementPreview'
+                ? artists.find(artist => artist.payee_id === result.payee.id)
+                : null
+              const blocked = Boolean(previewDuplicate || artistDuplicate || existingRunArtist || statementDuplicate)
               return <button key={result.payee.id} type="button" disabled={blocked} onClick={() => { setSelectedMatchPayeeId(result.payee.id); setPayeeMatchError(null) }} className="w-full text-left p-3 border-b last:border-b-0 transition-colors disabled:opacity-50" style={{ borderColor: 'var(--ops-border)', background: selectedMatchPayeeId === result.payee.id ? 'var(--sidebar-active-bg)' : 'var(--ops-surface)' }}>
                 <div className="flex items-start justify-between gap-4">
                   <div>
@@ -813,7 +1090,7 @@ export default function EddyMasterRunPage() {
                     {result.aliases.length > 0 && <div className="text-xs text-ops-muted">Aliases: {result.aliases.join(', ')}</div>}
                   </div>
                   <div className="text-right text-xs">
-                    {blocked ? <span className="text-red-400">Already matched in this run</span> : selectedMatchPayeeId === result.payee.id ? <span className="text-blue-500 font-semibold">Selected</span> : null}
+                    {blocked ? <span className="text-red-400">Already matched in this import/run</span> : statementExistingArtist ? <span className="text-amber-500">Uses existing run artist</span> : selectedMatchPayeeId === result.payee.id ? <span className="text-blue-500 font-semibold">Selected</span> : null}
                   </div>
                 </div>
               </button>

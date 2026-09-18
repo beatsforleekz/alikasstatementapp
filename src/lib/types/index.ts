@@ -378,6 +378,7 @@ export interface EddyMasterRunArtist {
   normalized_artist_name:     string
   email:                      string | null
   previous_carryover:         number
+  imported_final_balance:     number | null
   status:                     EddyMasterRunStatus
   email_subject:              string | null
   email_body:                 string | null
@@ -396,6 +397,12 @@ export interface EddyMasterStatement {
   statement_label: string
   amount:          number
   file_reference:  string | null
+  statement_import_id: string | null
+  eddy_period_ref:     string | null
+  eddy_payee_name:     string | null
+  eddy_payee_id:       string | null
+  eddy_contract_id:    string | null
+  eddy_statement_id:   string | null
   created_at:      string
   updated_at:      string
 }
