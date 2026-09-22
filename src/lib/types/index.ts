@@ -401,6 +401,14 @@ export interface EddyMasterStatement {
   amount_override: number | null
   amount_overridden_at: string | null
   amount_overridden_by: string | null
+  net_payee_subtotal: number | null
+  net_payee_subtotal_auto_corrected: number | null
+  net_payee_subtotal_correction_source: number | null
+  net_payee_subtotal_correction_reason: string | null
+  net_payee_subtotal_override: number | null
+  net_payee_subtotal_overridden_at: string | null
+  net_payee_subtotal_overridden_by: string | null
+  eddy_payee_split_percent: number | null
   file_reference:  string | null
   statement_import_id: string | null
   eddy_period_ref:     string | null
