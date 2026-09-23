@@ -19,11 +19,7 @@ import {
   normalizeEddyPayeeName,
   searchEddyPayees,
 } from '@/lib/utils/eddyPayeeMatching'
-import {
-  applyDuplicatedNegativeCorrections,
-  effectiveEddyNetPayeeSubtotal,
-  effectiveImportedNetPayeeSubtotal,
-} from '@/lib/utils/eddyStatementAmounts'
+import { effectiveEddyFinalDue, futureEddyOpeningCarryover, type EddyFinalDueRow, type EddyFinalDueResult } from '@/lib/utils/eddyFinalDue'
 
 type RunWithPeriod = EddyMasterRun & { statement_period: StatementPeriod }
 type ArtistRow = EddyMasterRunArtist & {
@@ -64,6 +60,7 @@ type EddyStatementCsvRow = {
   netPayeeSubtotalCorrectionSource?: number | null
   netPayeeSubtotalCorrectionReason?: string | null
   netPayeeSubtotalReviewIssue?: string | null
+  finalDueResult?: EddyFinalDueResult
 }
 
 type EddyStatementImportGroup = {
@@ -82,6 +79,16 @@ type PayeeMatchTarget =
   | { kind: 'preview'; rowNumber: number; importedName: string }
   | { kind: 'artist'; artistId: string; importedName: string }
   | { kind: 'statementPreview'; groupKey: string; importedName: string }
+
+type EddyEmailPreference = {
+  identity_key: string
+  payee_id: string | null
+  eddy_payee_id: string | null
+  normalized_artist_name: string
+  greeting_name: string | null
+  reference_name: string | null
+  subject_template: string | null
+}
 
 const STATUS_OPTIONS: { value: EddyMasterRunStatus; label: string }[] = [
   { value: 'to_prepare', label: 'To Prepare' },
@@ -117,7 +124,7 @@ function formatMoney(value: number, currency: string) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(Math.abs(value))
-  return value < 0 ? `(${formatted})` : formatted
+  return value < 0 ? `-${formatted}` : formatted
 }
 
 function formatEmailMoney(value: number) {
@@ -128,6 +135,46 @@ function formatEmailMoney(value: number) {
     maximumFractionDigits: 2,
   }).format(Math.abs(value))
   return value < 0 ? `-${formatted}` : formatted
+}
+
+function preserveEmailPersonalization(generatedBody: string, existingBody: string) {
+  let body = generatedBody
+  const savedGreeting = existingBody.match(/^Dear [^\r\n]+,$/m)?.[0]
+  if (savedGreeting) body = body.replace(/^Dear [^\r\n]+,$/m, savedGreeting)
+
+  const savedReferenceName = existingBody.match(/^Ref:\s*(.*?)\s+-\s+H[12]\s+\d{4}\s+Statement ULU\s*$/mi)?.[1]?.trim()
+  if (savedReferenceName) {
+    body = body.replace(
+      /^Ref:\s*.*?\s+-\s+(H[12]\s+\d{4}\s+Statement ULU)\s*$/mi,
+      (_match, suffix: string) => `Ref: ${savedReferenceName} - ${suffix}`,
+    )
+  }
+  return body
+}
+
+function applyEmailPreference(
+  generated: { subject: string; body: string },
+  preference: EddyEmailPreference,
+  period: string,
+) {
+  let body = generated.body
+  if (preference.greeting_name?.trim()) {
+    body = body.replace(/^Dear [^\r\n]+,$/m, `Dear ${preference.greeting_name.trim()},`)
+  }
+  if (preference.reference_name?.trim()) {
+    body = body.replace(
+      /^Ref:\s*.*?\s+-\s+(H[12]\s+\d{4}\s+Statement ULU)\s*$/mi,
+      (_match, suffix: string) => `Ref: ${preference.reference_name?.trim()} - ${suffix}`,
+    )
+  }
+  return {
+    subject: preference.subject_template?.trim().replaceAll('{period}', period) || generated.subject,
+    body,
+  }
+}
+
+function reusableSubjectTemplate(subject: string, period: string) {
+  return subject.includes(period) ? subject.replaceAll(period, '{period}') : subject
 }
 
 function displayEddyPeriodRef(value: string) {
@@ -145,6 +192,18 @@ function formatPercent(value: number | null) {
 
 function displayPayeeName(payee: Payee) {
   return payee.display_name?.trim() || payee.statement_name?.trim() || payee.payee_name
+}
+
+function emailPreferenceIdentity(artist: ArtistRow) {
+  const eddyPayeeId = artist.statements.find(statement => statement.eddy_payee_id)?.eddy_payee_id?.trim() || null
+  return {
+    identityKey: eddyPayeeId
+      ? `eddy:${eddyPayeeId}`
+      : artist.payee_id
+        ? `payee:${artist.payee_id}`
+        : `name:${artist.normalized_artist_name}`,
+    eddyPayeeId,
+  }
 }
 
 function statusBadge(status: EddyMasterRunStatus) {
@@ -183,6 +242,9 @@ export default function EddyMasterRunPage() {
   const [emailArtist, setEmailArtist] = useState<ArtistRow | null>(null)
   const [emailSubject, setEmailSubject] = useState('')
   const [emailBody, setEmailBody] = useState('')
+  const [emailDraftStale, setEmailDraftStale] = useState(false)
+  const [emailPreferences, setEmailPreferences] = useState<Record<string, EddyEmailPreference>>({})
+  const [saveEmailPreference, setSaveEmailPreference] = useState(false)
   const [copied, setCopied] = useState(false)
 
   const [showImport, setShowImport] = useState(false)
@@ -212,6 +274,15 @@ export default function EddyMasterRunPage() {
     () => searchEddyPayees(payeeSearch, payees, aliases),
     [payeeSearch, payees, aliases],
   )
+  const allFinalDueRows = useMemo<EddyFinalDueRow[]>(() => artists.flatMap(artist => artist.statements.map(statement => ({
+    periodRef: statement.eddy_period_ref ?? selectedRun?.statement_period.label ?? '',
+    contractId: statement.eddy_contract_id ?? statement.id,
+    contractName: statement.statement_label,
+    payeeId: statement.eddy_payee_id ?? artist.id,
+    splitPercent: statement.eddy_payee_split_percent,
+    finalDue: statement.amount,
+    manualOverride: statement.amount_override,
+  }))), [artists, selectedRun])
 
   useEffect(() => { void loadBase() }, [])
   useEffect(() => {
@@ -222,11 +293,12 @@ export default function EddyMasterRunPage() {
   async function loadBase() {
     setLoading(true)
     setError(null)
-    const [periodRes, payeeRes, aliasRes, runRes] = await Promise.all([
+    const [periodRes, payeeRes, aliasRes, runRes, preferenceRes] = await Promise.all([
       supabase.from('statement_periods').select('*').order('year', { ascending: false }).order('half', { ascending: false }),
       supabase.from('payees').select('*').order('payee_name'),
       supabase.from('payee_aliases').select('*').eq('is_active', true),
       supabase.from('eddy_master_runs').select('*, statement_period:statement_periods(*)').order('created_at', { ascending: false }),
+      supabase.from('eddy_master_email_preferences').select('*'),
     ])
     if (runRes.error) {
       setError(`${runRes.error.message}. Run migration 007_eddy_master_runs.sql before using this section.`)
@@ -236,6 +308,10 @@ export default function EddyMasterRunPage() {
     setPeriods(nextPeriods)
     setPayees((payeeRes.data ?? []) as Payee[])
     setAliases((aliasRes.data ?? []) as PayeeAlias[])
+    if (!preferenceRes.error) {
+      const preferences = (preferenceRes.data ?? []) as EddyEmailPreference[]
+      setEmailPreferences(Object.fromEntries(preferences.map(preference => [preference.identity_key, preference])))
+    }
     setRuns(nextRuns)
     setSelectedRunId(current => current && nextRuns.some(run => run.id === current) ? current : nextRuns[0]?.id ?? '')
     const unusedPeriod = nextPeriods.find(period => !nextRuns.some(run => run.statement_period_id === period.id))
@@ -283,27 +359,38 @@ export default function EddyMasterRunPage() {
     })))
   }
 
-  function effectiveNetPayeeSubtotal(statement: EddyMasterStatement) {
-    return effectiveEddyNetPayeeSubtotal(
-      statement.net_payee_subtotal == null ? null : Number(statement.net_payee_subtotal),
-      statement.net_payee_subtotal_auto_corrected == null ? null : Number(statement.net_payee_subtotal_auto_corrected),
-      statement.net_payee_subtotal_override == null ? null : Number(statement.net_payee_subtotal_override),
-    )
+  function finalDueResult(statement: EddyMasterStatement) {
+    const row = allFinalDueRows.find(item => item.contractId === (statement.eddy_contract_id ?? statement.id)
+      && item.payeeId === (statement.eddy_payee_id ?? statement.run_artist_id)
+      && item.periodRef === (statement.eddy_period_ref ?? selectedRun?.statement_period.label ?? ''))
+    return effectiveEddyFinalDue(row ?? {
+      periodRef: statement.eddy_period_ref ?? selectedRun?.statement_period.label ?? '',
+      contractId: statement.eddy_contract_id ?? statement.id,
+      contractName: statement.statement_label,
+      payeeId: statement.eddy_payee_id ?? statement.run_artist_id,
+      splitPercent: statement.eddy_payee_split_percent,
+      finalDue: statement.amount,
+      manualOverride: statement.amount_override,
+    }, allFinalDueRows)
   }
 
-  function currentPeriodNet(artist: ArtistRow) {
-    return artist.statements.reduce((sum, statement) => sum + (effectiveNetPayeeSubtotal(statement) ?? 0), 0)
+  function adjustedEddyBalance(artist: ArtistRow) {
+    return artist.statements.reduce((sum, statement) => sum + finalDueResult(statement).amount, 0)
+  }
+
+  function verificationCount(artist: ArtistRow) {
+    return artist.statements.filter(statement => finalDueResult(statement).needsVerification).length
   }
 
   function closingBalance(artist: ArtistRow) {
-    return Number(artist.previous_carryover ?? 0) + currentPeriodNet(artist)
+    return Number((Number(artist.previous_carryover ?? 0) + adjustedEddyBalance(artist)).toFixed(2))
   }
 
   const summary = useMemo(() => ({
     artistCount: artists.length,
     statementCount: artists.reduce((sum, artist) => sum + artist.statements.length, 0),
     openingCarryover: artists.reduce((sum, artist) => sum + Number(artist.previous_carryover ?? 0), 0),
-    currentPeriodNet: artists.reduce((sum, artist) => sum + currentPeriodNet(artist), 0),
+    eddyBalance: artists.reduce((sum, artist) => sum + adjustedEddyBalance(artist), 0),
     payableClosing: artists.reduce((sum, artist) => {
       const closing = closingBalance(artist)
       return sum + (closing >= EDDY_PAYMENT_THRESHOLD ? closing : 0)
@@ -342,6 +429,7 @@ export default function EddyMasterRunPage() {
 
   async function findLatestCarryover(payeeId: string, artistName: string) {
     if (!selectedRun) return null
+    if (selectedRun.statement_period.year === 2026 && selectedRun.statement_period.half === 'H1') return null
     const priorRunIds = runs
       .filter(run => run.id !== selectedRun.id && run.statement_period.period_end < selectedRun.statement_period.period_start)
       .sort((a, b) => b.statement_period.period_end.localeCompare(a.statement_period.period_end))
@@ -353,16 +441,30 @@ export default function EddyMasterRunPage() {
     const candidates = (data ?? []) as EddyMasterRunArtist[]
     const latest = priorRunIds.map(id => candidates.find(row => row.run_id === id)).find(Boolean)
     if (!latest) return null
-    const { data: entries } = await supabase.from('eddy_master_statements').select('net_payee_subtotal, net_payee_subtotal_auto_corrected, net_payee_subtotal_override').eq('run_artist_id', latest.id)
-    const total = (entries ?? []).reduce((sum, entry) => {
-      const effective = entry.net_payee_subtotal_override != null
-        ? Number(entry.net_payee_subtotal_override)
-        : entry.net_payee_subtotal_auto_corrected != null
-          ? Number(entry.net_payee_subtotal_auto_corrected)
-          : Number(entry.net_payee_subtotal ?? 0)
-      return sum + effective
-    }, Number(latest.previous_carryover ?? 0))
-    return { amount: total < EDDY_PAYMENT_THRESHOLD ? total : 0, sourceArtistId: latest.id }
+    const { data: priorArtists } = await supabase.from('eddy_master_run_artists').select('id').eq('run_id', latest.run_id)
+    const priorArtistIds = (priorArtists ?? []).map(row => row.id)
+    const { data: entries } = priorArtistIds.length > 0
+      ? await supabase.from('eddy_master_statements').select('*').in('run_artist_id', priorArtistIds)
+      : { data: [] }
+    const priorStatements = (entries ?? []) as EddyMasterStatement[]
+    const finalDueRows: EddyFinalDueRow[] = priorStatements.map(statement => ({
+      periodRef: statement.eddy_period_ref ?? '',
+      contractId: statement.eddy_contract_id ?? statement.id,
+      contractName: statement.statement_label,
+      payeeId: statement.eddy_payee_id ?? statement.run_artist_id,
+      splitPercent: statement.eddy_payee_split_percent == null ? null : Number(statement.eddy_payee_split_percent),
+      finalDue: Number(statement.amount ?? 0),
+      manualOverride: statement.amount_override == null ? null : Number(statement.amount_override),
+    }))
+    const priorClosing = priorStatements
+      .filter(statement => statement.run_artist_id === latest.id)
+      .reduce((sum, statement) => {
+        const row = finalDueRows.find(item => item.contractId === (statement.eddy_contract_id ?? statement.id)
+          && item.payeeId === (statement.eddy_payee_id ?? statement.run_artist_id)
+          && item.periodRef === (statement.eddy_period_ref ?? ''))
+        return sum + (row ? effectiveEddyFinalDue(row, finalDueRows).amount : 0)
+      }, Number(latest.previous_carryover ?? 0))
+    return { amount: futureEddyOpeningCarryover(priorClosing), sourceArtistId: latest.id }
   }
 
   async function selectPayeeForArtist(payeeId: string) {
@@ -483,14 +585,9 @@ export default function EddyMasterRunPage() {
   }
 
   async function overrideStatementAmount(statement: EddyMasterStatement) {
-    const sourceSubtotal = statement.net_payee_subtotal
-    if (sourceSubtotal == null) {
-      setError('This statement has no imported Net Payee Subtotal. Re-import the Eddy Statements List row before applying an override.')
-      return
-    }
     const entered = window.prompt(
-      `Corrected Net Payee Subtotal for ${statement.statement_label}. The original Eddy value remains ${formatMoney(sourceSubtotal, selectedRun?.currency ?? 'GBP')}.`,
-      String(effectiveNetPayeeSubtotal(statement)),
+      `Effective Final Due for ${statement.statement_label}. Raw Eddy Final Due remains ${formatMoney(statement.amount, selectedRun?.currency ?? 'GBP')}.`,
+      String(finalDueResult(statement).amount),
     )
     if (entered === null) return
     const amount = parseAmount(entered)
@@ -500,9 +597,9 @@ export default function EddyMasterRunPage() {
     }
     setSaving(true)
     const { error: updateError } = await supabase.from('eddy_master_statements').update({
-      net_payee_subtotal_override: amount,
-      net_payee_subtotal_overridden_at: new Date().toISOString(),
-      net_payee_subtotal_overridden_by: user?.id ?? null,
+      amount_override: amount,
+      amount_overridden_at: new Date().toISOString(),
+      amount_overridden_by: user?.id ?? null,
     }).eq('id', statement.id)
     setSaving(false)
     if (updateError) setError(updateError.message)
@@ -512,9 +609,9 @@ export default function EddyMasterRunPage() {
   async function resetStatementAmount(statement: EddyMasterStatement) {
     setSaving(true)
     const { error: updateError } = await supabase.from('eddy_master_statements').update({
-      net_payee_subtotal_override: null,
-      net_payee_subtotal_overridden_at: null,
-      net_payee_subtotal_overridden_by: null,
+      amount_override: null,
+      amount_overridden_at: null,
+      amount_overridden_by: null,
     }).eq('id', statement.id)
     setSaving(false)
     if (updateError) setError(updateError.message)
@@ -541,23 +638,40 @@ export default function EddyMasterRunPage() {
     const closing = closingBalance(artist)
     const fullPayeeName = artist.payee?.payee_name?.trim() || artist.artist_name.trim()
     const greeting = fullPayeeName.split(/\s+/)[0] || fullPayeeName
-    const balanceLines = `Previous carryover: ${formatEmailMoney(Number(artist.previous_carryover ?? 0))}\nCurrent period net: ${formatEmailMoney(currentPeriodNet(artist))}\nClosing balance: ${formatEmailMoney(closing)}`
+    const balanceLines = `Previous carryover: ${formatEmailMoney(Number(artist.previous_carryover ?? 0))}\nCurrent period net: ${formatEmailMoney(adjustedEddyBalance(artist))}\nClosing balance: ${formatEmailMoney(closing)}`
     const closingSection = closing >= EDDY_PAYMENT_THRESHOLD
       ? `If approved please forward your invoice to:\n\nMusic Matters BYpittbull Ltd\n465C Hornsey Road\nUnit 2 | Office 10\nLondon | N19 4DR\nUnited Kingdom\n\nRef: ${fullPayeeName} - ${period} Statement ULU`
       : closing >= 0
         ? 'As payable balance is below £100 it will be forwarded onto your next statement.'
         : 'Your current balance is unrecouped and will be carried forward onto your next statement.'
-    return {
+    const generated = {
       subject: `${period} Statements - Ulu`,
       body: `Dear ${greeting},\n\nPlease find attached your statement(s) for ${period}.\n\n${balanceLines}\n\n${closingSection}`,
     }
+    const preference = emailPreferences[emailPreferenceIdentity(artist).identityKey]
+    return preference ? applyEmailPreference(generated, preference, period) : generated
   }
 
   function openEmail(artist: ArtistRow) {
     const generated = generateEmail(artist)
+    const savedClosing = artist.email_body?.match(/^Closing balance:.*$/m)?.[0]
+    const savedCurrentPeriodNet = artist.email_body?.match(/^Current period net:.*$/m)?.[0]
+    const savedEddyBalance = artist.email_body?.match(/^Eddy statement balance:.*$/m)?.[0]
+    const currentClosing = `Closing balance: ${formatEmailMoney(closingBalance(artist))}`
+    const currentPeriodNet = `Current period net: ${formatEmailMoney(adjustedEddyBalance(artist))}`
+    const stale = Boolean(artist.email_body && (savedEddyBalance
+      || (savedClosing && savedClosing !== currentClosing)
+      || (savedCurrentPeriodNet && savedCurrentPeriodNet !== currentPeriodNet)))
+    const hasSavedDraft = Boolean(artist.email_prepared_at)
     setEmailArtist(artist)
-    setEmailSubject(artist.email_subject ?? generated.subject)
-    setEmailBody(artist.email_body ?? generated.body)
+    setEmailDraftStale(stale)
+    setEmailSubject(hasSavedDraft ? artist.email_subject ?? generated.subject : generated.subject)
+    setEmailBody(hasSavedDraft
+      ? stale
+        ? preserveEmailPersonalization(generated.body, artist.email_body ?? '')
+        : artist.email_body ?? generated.body
+      : generated.body)
+    setSaveEmailPreference(false)
     setCopied(false)
   }
 
@@ -571,8 +685,33 @@ export default function EddyMasterRunPage() {
       email_prepared_at: new Date().toISOString(),
       status: preserveFinalStatus ? emailArtist.status : 'ready',
     }).eq('id', emailArtist.id)
+
+    let preferenceError: string | null = null
+    if (!updateError && saveEmailPreference && selectedRun) {
+      const period = displayEddyPeriodRef(selectedRun.statement_period.label)
+      const identity = emailPreferenceIdentity(emailArtist)
+      const preference: EddyEmailPreference = {
+        identity_key: identity.identityKey,
+        payee_id: emailArtist.payee_id,
+        eddy_payee_id: identity.eddyPayeeId,
+        normalized_artist_name: emailArtist.normalized_artist_name,
+        greeting_name: emailBody.match(/^Dear\s+([^\r\n]+),$/m)?.[1]?.trim() || null,
+        reference_name: emailBody.match(/^Ref:\s*(.*?)\s+-\s+H[12]\s+\d{4}\s+Statement ULU\s*$/mi)?.[1]?.trim() || null,
+        subject_template: reusableSubjectTemplate(emailSubject.trim(), period),
+      }
+      const { error: preferenceSaveError } = await supabase.from('eddy_master_email_preferences').upsert({
+        ...preference,
+        updated_by: user?.id ?? null,
+      }, { onConflict: 'identity_key' })
+      if (preferenceSaveError) {
+        preferenceError = `${preferenceSaveError.message}. Run migration 016_eddy_email_preferences.sql to enable permanent Eddy email preferences.`
+      } else {
+        setEmailPreferences(current => ({ ...current, [preference.identity_key]: preference }))
+      }
+    }
     setSaving(false)
     if (updateError) setError(updateError.message)
+    else if (preferenceError) setError(`Email draft saved, but permanent preferences were not saved: ${preferenceError}`)
     else {
       setEmailArtist(null)
       if (selectedRun) await loadArtists(selectedRun.id)
@@ -914,9 +1053,22 @@ export default function EddyMasterRunPage() {
       setError('Select an Eddy Period Ref before continuing.')
       return
     }
-    const selectedRows = applyDuplicatedNegativeCorrections(
-      statementCsvRows.filter(row => row.periodRef === selectedStatementPeriod),
-    )
+    const selectedRows = statementCsvRows.filter(row => row.periodRef === selectedStatementPeriod)
+    const finalRows: EddyFinalDueRow[] = selectedRows.map(row => ({
+      periodRef: row.periodRef,
+      contractId: row.contractId,
+      contractName: row.contractName,
+      payeeId: row.eddyPayeeId || row.payeeName,
+      splitPercent: row.payeeSplitPercent,
+      finalDue: row.finalDue ?? 0,
+    }))
+    selectedRows.forEach((row, index) => {
+      const existing = artists.flatMap(artist => artist.statements)
+        .find(statement => statement.eddy_statement_id === row.statementId)
+      row.finalDueResult = effectiveEddyFinalDue({
+        ...finalRows[index], manualOverride: existing?.amount_override,
+      }, finalRows)
+    })
     const groups = new Map<string, EddyStatementCsvRow[]>()
     selectedRows.forEach(row => {
       const key = row.eddyPayeeId ? `eddy:${row.eddyPayeeId}` : `name:${normalizeEddyPayeeName(row.payeeName)}`
@@ -932,7 +1084,6 @@ export default function EddyMasterRunPage() {
       const first = rows[0]
       const automaticMatch = automaticallyMatchEddyPayee(first.payeeName, payees, aliases)
       const invalidRow = rows.find(row => !row.payeeName || !row.contractName || !row.contractId || !row.statementId || row.netPayeeSubtotal === null || row.finalDue === null)
-      const correctionReviewRow = rows.find(row => row.netPayeeSubtotalReviewIssue)
       const duplicateId = rows.find(row => duplicateStatementIds.has(row.statementId))
       const base: EddyStatementImportGroup = {
         key,
@@ -945,8 +1096,6 @@ export default function EddyMasterRunPage() {
         statements: rows,
         issue: invalidRow
           ? `Row ${invalidRow.rowNumber} is missing a required value`
-          : correctionReviewRow
-            ? `${correctionReviewRow.contractName}: ${correctionReviewRow.netPayeeSubtotalReviewIssue}`
           : duplicateId
             ? `Statement ID ${duplicateId.statementId} is duplicated in the selected period`
             : null,
@@ -978,8 +1127,8 @@ export default function EddyMasterRunPage() {
       statement_id: statement.statementId,
       payee_split_percent: statement.payeeSplitPercent,
       net_payee_subtotal: statement.netPayeeSubtotal,
-      duplicate_negative_correction: statement.autoCorrectedNetPayeeSubtotal != null,
-      contract_negative_source: statement.netPayeeSubtotalCorrectionSource,
+      duplicate_negative_correction: false,
+      contract_negative_source: null,
       final_due: statement.finalDue,
     })))
     setSaving(true)
@@ -1019,7 +1168,7 @@ export default function EddyMasterRunPage() {
   const selectedStatementRows = statementCsvRows.filter(row => row.periodRef === selectedStatementPeriod)
   const statementPreviewTotal = statementImportGroups.reduce(
     (sum, group) => sum + group.statements.reduce(
-      (groupSum, statement) => groupSum + Number(effectiveImportedNetPayeeSubtotal(statement) ?? 0),
+      (groupSum, statement) => groupSum + Number(statement.finalDueResult?.amount ?? 0),
       0,
     ),
     0,
@@ -1053,7 +1202,7 @@ export default function EddyMasterRunPage() {
 
       {error && <Alert type="error">{error}</Alert>}
       {notice && <Alert type="success">{notice}</Alert>}
-      {missingNetSubtotalCount > 0 && <Alert type="warning">{missingNetSubtotalCount} Eddy statement{missingNetSubtotalCount === 1 ? '' : 's'} cannot be included in Current Period Net because Net Payee Subtotal is missing. Re-import the source Eddy Statements List; Final Due will not be substituted.</Alert>}
+      {missingNetSubtotalCount > 0 && <Alert type="warning">{missingNetSubtotalCount} Eddy statement{missingNetSubtotalCount === 1 ? '' : 's'} have no Net Payee Subtotal for movement/audit. Their Final Due still determines the Eddy balance.</Alert>}
 
       {runs.length === 0 ? (
         <div className="card"><EmptyState title="No Eddy Master Runs yet" description="Create a run for a statement period to begin." icon={FileSpreadsheet} /></div>
@@ -1077,7 +1226,7 @@ export default function EddyMasterRunPage() {
             <StatCard label="Artists" value={summary.artistCount} />
             <StatCard label="Eddy Statements" value={summary.statementCount} />
             <StatCard label="Opening Carryover" value={formatMoney(summary.openingCarryover, currency)} />
-            <StatCard label="Current Period Net" value={formatMoney(summary.currentPeriodNet, currency)} color="green" />
+            <StatCard label="Eddy Closing Positions" value={formatMoney(summary.eddyBalance, currency)} color="green" />
             <StatCard label="Payable Closing" value={formatMoney(summary.payableClosing, currency)} color="blue" />
             <StatCard label="Positive Carry Forward" value={formatMoney(summary.positiveCarryForward, currency)} color="amber" />
             <StatCard label="Unrecouped Closing" value={formatMoney(summary.negativeClosing, currency)} color="red" />
@@ -1093,7 +1242,7 @@ export default function EddyMasterRunPage() {
               <table className="ops-table min-w-max whitespace-nowrap">
                 <thead><tr>
                   <th className="w-8"></th><th>Artist</th><th>Email</th><th className="text-right">Eddy Statements</th>
-                  <th className="text-right">Previous Carryover</th><th className="text-right">Current Period Net</th>
+                  <th className="text-right">Previous Carryover</th><th className="text-right">Eddy Closing Positions</th>
                   <th className="text-right">Closing Balance</th><th>Position</th><th>Status</th><th>Actions</th>
                 </tr></thead>
                 <tbody>
@@ -1123,9 +1272,9 @@ export default function EddyMasterRunPage() {
                             {formatMoney(Number(artist.previous_carryover ?? 0), currency)}
                           </span>
                         </td>
-                        <td className="text-right font-mono whitespace-nowrap">{formatMoney(currentPeriodNet(artist), currency)}</td>
+                        <td className="text-right font-mono whitespace-nowrap">{formatMoney(adjustedEddyBalance(artist), currency)}</td>
                         <td className="text-right font-mono font-semibold whitespace-nowrap">{formatMoney(closingBalance(artist), currency)}</td>
-                        <td>{closingBalance(artist) >= EDDY_PAYMENT_THRESHOLD ? <span className="badge-approved">Payable</span> : closingBalance(artist) < 0 ? <span className="badge-warning">Unrecouped</span> : closingBalance(artist) > 0 ? <span className="badge-pending">Carry Forward</span> : <span className="badge-pending">Zero</span>}</td>
+                        <td><div>{closingBalance(artist) >= EDDY_PAYMENT_THRESHOLD ? <span className="badge-approved">Payable</span> : closingBalance(artist) < 0 ? <span className="badge-warning">Unrecouped</span> : closingBalance(artist) > 0 ? <span className="badge-pending">Carry Forward</span> : <span className="badge-pending">Zero</span>}</div>{verificationCount(artist) > 0 && <div className="text-[10px] text-amber-500 mt-1">Verify {verificationCount(artist)} Eddy row{verificationCount(artist) === 1 ? '' : 's'}</div>}</td>
                         <td className="whitespace-nowrap">{statusBadge(artist.status)}</td>
                         <td><div className="flex flex-nowrap gap-1 min-w-max">
                           <button className="btn-secondary btn-sm" onClick={() => openEmail(artist)}><Mail size={12} /> Prepare Email</button>
@@ -1146,28 +1295,23 @@ export default function EddyMasterRunPage() {
                           </div>
                           <div>
                             <div className="section-title mb-2">Eddy Statement Entries</div>
-                            {artist.statements.length > 0 && <div className="rounded border overflow-x-auto mb-3" style={{ borderColor: 'var(--ops-border)' }}><table className="ops-table min-w-max whitespace-nowrap"><thead><tr><th>Contract</th><th>Payee Split %</th><th className="text-right">Net Payee Subtotal</th><th className="text-right">Final Due</th><th>Position</th><th>Filename / Reference</th><th>Actions</th></tr></thead><tbody>
+                            {artist.statements.length > 0 && <div className="rounded border overflow-x-auto mb-3" style={{ borderColor: 'var(--ops-border)' }}><table className="ops-table min-w-max whitespace-nowrap"><thead><tr><th>Contract</th><th>Payee Split %</th><th className="text-right">Net Payee Subtotal</th><th className="text-right">Raw Final Due</th><th className="text-right">Effective Final Due</th><th>Source / Check</th><th>Actions</th></tr></thead><tbody>
                               {artist.statements.map(statement => {
-                                const effective = effectiveNetPayeeSubtotal(statement)
+                                const result = finalDueResult(statement)
                                 return <tr key={statement.id}>
                                   <td><div>{statement.statement_label}</div>{statement.eddy_statement_id && <div className="text-[11px] text-ops-muted font-mono">Contract {statement.eddy_contract_id || '—'} · Statement {statement.eddy_statement_id}</div>}</td>
                                   <td className="font-mono">{formatPercent(statement.eddy_payee_split_percent)}</td>
-                                  <td className="text-right font-mono">
-                                    <div>{effective == null ? <span className="text-red-400">Missing</span> : formatMoney(effective, currency)}</div>
-                                    {statement.net_payee_subtotal_override != null && <div className="text-[11px] text-amber-500">Manual override</div>}
-                                    {statement.net_payee_subtotal_auto_corrected != null && statement.net_payee_subtotal != null && <div className="text-[11px] text-blue-400">{statement.net_payee_subtotal_correction_reason || `Adjusted from duplicated Eddy contract balance using ${formatPercent(statement.eddy_payee_split_percent)} payee split`} · original {formatMoney(statement.net_payee_subtotal, currency)}</div>}
-                                    <div className="text-[10px] text-ops-muted">Used in balance calculation</div>
-                                  </td>
-                                  <td className="text-right font-mono"><div>{formatMoney(statement.amount, currency)}</div><div className="text-[10px] text-ops-muted">Reference only</div></td>
-                                  <td>{effective == null ? <span className="badge-critical">Review</span> : effective < 0 ? <span className="badge-warning">Unrecouped</span> : effective === 0 ? <span className="badge-pending">Zero</span> : <span className="badge-approved">Positive</span>}</td>
-                                  <td className="text-ops-muted">{statement.file_reference || '—'}</td>
-                                  <td><div className="flex flex-nowrap gap-1 min-w-max"><button className="btn-secondary btn-sm" disabled={saving || effective == null} onClick={() => void overrideStatementAmount(statement)}>Adjust</button>{statement.net_payee_subtotal_override != null && <button className="btn-secondary btn-sm" disabled={saving} onClick={() => void resetStatementAmount(statement)}>Reset</button>}<button className="btn-icon text-red-400" onClick={() => void deleteStatement(statement.id)}><Trash2 size={13} /></button></div></td>
+                                  <td className="text-right font-mono"><div>{statement.net_payee_subtotal == null ? '—' : formatMoney(statement.net_payee_subtotal, currency)}</div><div className="text-[10px] text-ops-muted">Movement / audit only</div>{statement.net_payee_subtotal_override != null && <div className="text-[10px] text-amber-500">Legacy subtotal override: {formatMoney(statement.net_payee_subtotal_override, currency)}</div>}</td>
+                                  <td className="text-right font-mono">{formatMoney(statement.amount, currency)}</td>
+                                  <td className="text-right font-mono font-semibold">{formatMoney(result.amount, currency)}</td>
+                                  <td><span className={result.needsVerification ? 'badge-warning' : result.source === 'shared-deficit corrected' ? 'badge-info' : 'badge-pending'}>{result.source}</span>{result.needsVerification && <div className="text-[10px] text-amber-500">Verify against Eddy PDF before sending</div>}{statement.file_reference && <div className="text-[10px] text-ops-muted">{statement.file_reference}</div>}</td>
+                                  <td><div className="flex flex-nowrap gap-1 min-w-max"><button className="btn-secondary btn-sm" disabled={saving} onClick={() => void overrideStatementAmount(statement)}>Adjust</button>{statement.amount_override != null && <button className="btn-secondary btn-sm" disabled={saving} onClick={() => void resetStatementAmount(statement)}>Reset</button>}<button className="btn-icon text-red-400" onClick={() => void deleteStatement(statement.id)}><Trash2 size={13} /></button></div></td>
                                 </tr>
                               })}
                             </tbody></table></div>}
                             <div className="grid md:grid-cols-[1fr_160px_1fr_auto] gap-2 items-end">
                               <div className="ops-field"><label className="ops-label">Statement / Contract Label</label><input className="ops-input" value={statementDraft.label} onChange={event => setStatementDraft(value => ({ ...value, label: event.target.value }))} placeholder="e.g. Artist Services Agreement" /></div>
-                              <div className="ops-field"><label className="ops-label">Net Payee Subtotal</label><input className="ops-input font-mono" value={statementDraft.amount} onChange={event => setStatementDraft(value => ({ ...value, amount: event.target.value }))} placeholder="0.00" /></div>
+                              <div className="ops-field"><label className="ops-label">Manual Final Due</label><input className="ops-input font-mono" value={statementDraft.amount} onChange={event => setStatementDraft(value => ({ ...value, amount: event.target.value }))} placeholder="0.00" /></div>
                               <div className="ops-field"><label className="ops-label">Filename / Reference</label><input className="ops-input" value={statementDraft.reference} onChange={event => setStatementDraft(value => ({ ...value, reference: event.target.value }))} /></div>
                               <button className="btn-primary" disabled={saving} onClick={() => void addStatement(artist.id)}><Plus size={13} /> Add</button>
                             </div>
@@ -1204,11 +1348,18 @@ export default function EddyMasterRunPage() {
 
       {emailArtist && <Modal title={`Prepare Email - ${emailArtist.artist_name}`} wide onClose={() => setEmailArtist(null)}>
         <div className="space-y-3">
+          {emailDraftStale && <Alert type="warning">This saved draft used earlier wording or figures. A fresh approved-template email is shown below; review it before copying or saving.</Alert>}
+          {verificationCount(emailArtist) > 0 && <Alert type="warning">{verificationCount(emailArtist)} Eddy statement row{verificationCount(emailArtist) === 1 ? '' : 's'} use raw Final Due because a non-feature negative pattern is not verified as shared or payee-specific. Check the PDF before sending externally; Email Prep remains available.</Alert>}
           <div className="flex justify-between text-sm"><span className="text-ops-muted">Recipient</span><span className={emailArtist.email ? '' : 'text-red-400'}>{emailArtist.email || 'Email missing'}</span></div>
           <div className="flex justify-between text-sm"><span className="text-ops-muted">Attachments required</span><strong>{emailArtist.statements.length} statement{emailArtist.statements.length === 1 ? '' : 's'}</strong></div>
           <div className="ops-field"><label className="ops-label">Subject</label><input className="ops-input" value={emailSubject} onChange={event => setEmailSubject(event.target.value)} /></div>
           <div className="ops-field"><label className="ops-label">Body</label><textarea className="ops-textarea min-h-[280px] font-mono text-xs" value={emailBody} onChange={event => setEmailBody(event.target.value)} /></div>
-          <div className="flex justify-between"><button className="btn-secondary" onClick={() => void copyEmail()}><Clipboard size={13} /> {copied ? 'Copied' : 'Copy Email'}</button><div className="flex gap-2"><button className="btn-secondary" onClick={() => { const generated = generateEmail(emailArtist); setEmailSubject(generated.subject); setEmailBody(generated.body) }}>Regenerate</button><button className="btn-primary" disabled={saving} onClick={() => void saveEmail()}><Save size={13} /> Save as Ready</button></div></div>
+          <label className="flex items-start gap-2 rounded border p-3 text-sm cursor-pointer" style={{ borderColor: 'var(--ops-border)' }}>
+            <input className="mt-0.5" type="checkbox" checked={saveEmailPreference} onChange={event => setSaveEmailPreference(event.target.checked)} />
+            <span><strong>Would you like changes to the name and subject saved permanently?</strong><span className="block text-xs text-ops-muted mt-1">Applies the greeting, invoice reference name, and subject pattern to newly generated emails in future Eddy periods. Financial figures and period references will still refresh.</span></span>
+          </label>
+          {emailPreferences[emailPreferenceIdentity(emailArtist).identityKey] && <div className="text-xs text-green-500">Permanent Eddy email preferences are currently saved for this payee.</div>}
+          <div className="flex justify-between"><button className="btn-secondary" onClick={() => void copyEmail()}><Clipboard size={13} /> {copied ? 'Copied' : 'Copy Email'}</button><div className="flex gap-2"><button className="btn-secondary" onClick={() => { const generated = generateEmail(emailArtist); setEmailBody(preserveEmailPersonalization(generated.body, emailBody)); setEmailDraftStale(false) }}>Regenerate</button><button className="btn-primary" disabled={saving} onClick={() => void saveEmail()}><Save size={13} /> Save as Ready</button></div></div>
         </div>
       </Modal>}
 
@@ -1227,11 +1378,11 @@ export default function EddyMasterRunPage() {
             <div className="flex justify-between"><button className="btn-secondary" onClick={() => setStatementImportStep('upload')}>Back</button><button className="btn-primary" disabled={!selectedStatementPeriod} onClick={buildEddyStatementPreview}>Preview {selectedStatementPeriod || 'Selected Period'}</button></div>
           </div>}
           {statementImportStep === 'preview' && <div className="space-y-4">
-            <div className="grid sm:grid-cols-3 gap-3"><div className="rounded border p-3" style={{ borderColor: 'var(--ops-border)' }}><div className="text-xs text-ops-muted">Selected Eddy Period</div><div className="font-semibold">{selectedStatementPeriod}</div></div><div className="rounded border p-3" style={{ borderColor: 'var(--ops-border)' }}><div className="text-xs text-ops-muted">Statement Rows</div><div className="font-semibold">{selectedStatementRows.length}</div></div><div className="rounded border p-3" style={{ borderColor: 'var(--ops-border)' }}><div className="text-xs text-ops-muted">Current Period Net</div><div className="font-semibold font-mono">{formatMoney(statementPreviewTotal, currency)}</div></div></div>
-            <Alert type="info">Preview grouped into {statementImportGroups.length} artist/payee record{statementImportGroups.length === 1 ? '' : 's'}. Current Period Net uses every payee subtotal, automatically splitting only repeated negative contract balances. Final Due remains reference only. Previous Carryover is preserved.</Alert>
-            <div className="max-h-[480px] overflow-auto rounded border" style={{ borderColor: 'var(--ops-border)' }}><table className="ops-table"><thead><tr><th className="w-8"></th><th>Eddy Payee Name</th><th>App Payee Match</th><th>Run Artist</th><th className="text-right">Previous Carryover</th><th className="text-right">Statements</th><th className="text-right">Current Period Net</th></tr></thead><tbody>{statementImportGroups.map(group => <FragmentRow key={group.key}><tr><td><button className="btn-icon" onClick={() => setExpandedStatementGroup(current => current === group.key ? null : group.key)}>{expandedStatementGroup === group.key ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button></td><td><div className="font-medium">{group.payeeName}</div><div className="text-[11px] text-ops-muted">Eddy Payee ID: {group.eddyPayeeId || '—'}</div></td><td>{group.matchedPayee ? <div><div>{displayPayeeName(group.matchedPayee)}</div><div className="text-[11px] text-ops-muted">{group.matchMethod === 'manual' ? 'Manually matched' : 'Automatically matched'}</div></div> : <div className="flex items-center gap-2"><span className="badge-warning">Unmatched</span><button className="btn-secondary btn-sm" onClick={() => openStatementPayeeMatch(group)}><Search size={12} /> Find Payee</button></div>}</td><td>{group.issue ? <span className="text-red-400">{group.issue}</span> : group.existingArtist ? <div><span className="badge-info">Existing</span><div className="text-[11px] text-ops-muted mt-1">{group.existingArtist.artist_name}</div></div> : <span className="badge-pending">Will create</span>}</td><td className="text-right font-mono">{formatMoney(Number(group.existingArtist?.previous_carryover ?? 0), currency)}</td><td className="text-right font-mono">{group.statements.length}</td><td className="text-right font-mono font-semibold">{formatMoney(group.statements.reduce((sum, statement) => sum + Number(effectiveImportedNetPayeeSubtotal(statement) ?? 0), 0), currency)}</td></tr>{expandedStatementGroup === group.key && <tr><td colSpan={7} className="!p-0"><div className="p-3" style={{ background: 'var(--ops-surface-2)' }}><table className="ops-table text-xs"><thead><tr><th>Contract Name</th><th>Contract ID</th><th>Statement ID</th><th>Payee Split %</th><th className="text-right">Original Net Payee Subtotal</th><th className="text-right">Effective Net Payee Subtotal</th><th className="text-right">Final Due</th><th>Import Status</th></tr></thead><tbody>{group.statements.map(statement => {
-              const effective = effectiveImportedNetPayeeSubtotal(statement)
-              return <tr key={`${group.key}-${statement.statementId}`}><td>{statement.contractName}</td><td className="font-mono">{statement.contractId}</td><td className="font-mono">{statement.statementId}</td><td className="font-mono">{formatPercent(statement.payeeSplitPercent)}</td><td className="text-right font-mono">{statement.netPayeeSubtotal === null ? <span className="text-red-400">Missing</span> : formatMoney(statement.netPayeeSubtotal, currency)}</td><td className="text-right font-mono"><div className={Number(effective ?? 0) < 0 ? 'text-amber-500' : ''}>{effective === null ? <span className="text-red-400">Missing</span> : formatMoney(effective, currency)}</div>{statement.netPayeeSubtotalCorrectionReason && <div className="text-[10px] text-blue-400 max-w-64 whitespace-normal">{statement.netPayeeSubtotalCorrectionReason}</div>}<div className="text-[10px] text-ops-muted">Used in balance</div></td><td className="text-right font-mono"><div>{statement.finalDue === null ? '—' : formatMoney(statement.finalDue, currency)}</div><div className="text-[10px] text-ops-muted">Reference only</div></td><td>{group.issue ? <span className="badge-critical">Review</span> : importedStatementIds.has(statement.statementId) ? <span className="badge-info">Will update</span> : <span className="badge-pending">New</span>}</td></tr>
+            <div className="grid sm:grid-cols-3 gap-3"><div className="rounded border p-3" style={{ borderColor: 'var(--ops-border)' }}><div className="text-xs text-ops-muted">Selected Eddy Period</div><div className="font-semibold">{selectedStatementPeriod}</div></div><div className="rounded border p-3" style={{ borderColor: 'var(--ops-border)' }}><div className="text-xs text-ops-muted">Statement Rows</div><div className="font-semibold">{selectedStatementRows.length}</div></div><div className="rounded border p-3" style={{ borderColor: 'var(--ops-border)' }}><div className="text-xs text-ops-muted">Effective Final Due Total</div><div className="font-semibold font-mono">{formatMoney(statementPreviewTotal, currency)}</div></div></div>
+            <Alert type="info">Preview grouped into {statementImportGroups.length} artist/payee record{statementImportGroups.length === 1 ? '' : 's'}. Signed Final Due drives the Eddy balance; Net Payee Subtotal is movement/audit only. Feature/FAC contracts are never auto-split. Questionable non-feature rows remain usable and are marked for verification. Previous Carryover is preserved.</Alert>
+            <div className="max-h-[480px] overflow-auto rounded border" style={{ borderColor: 'var(--ops-border)' }}><table className="ops-table"><thead><tr><th className="w-8"></th><th>Eddy Payee Name</th><th>App Payee Match</th><th>Run Artist</th><th className="text-right">Previous Carryover</th><th className="text-right">Statements</th><th className="text-right">Effective Final Due</th></tr></thead><tbody>{statementImportGroups.map(group => <FragmentRow key={group.key}><tr><td><button className="btn-icon" onClick={() => setExpandedStatementGroup(current => current === group.key ? null : group.key)}>{expandedStatementGroup === group.key ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button></td><td><div className="font-medium">{group.payeeName}</div><div className="text-[11px] text-ops-muted">Eddy Payee ID: {group.eddyPayeeId || '—'}</div></td><td>{group.matchedPayee ? <div><div>{displayPayeeName(group.matchedPayee)}</div><div className="text-[11px] text-ops-muted">{group.matchMethod === 'manual' ? 'Manually matched' : 'Automatically matched'}</div></div> : <div className="flex items-center gap-2"><span className="badge-warning">Unmatched</span><button className="btn-secondary btn-sm" onClick={() => openStatementPayeeMatch(group)}><Search size={12} /> Find Payee</button></div>}</td><td>{group.issue ? <span className="text-red-400">{group.issue}</span> : group.existingArtist ? <div><span className="badge-info">Existing</span><div className="text-[11px] text-ops-muted mt-1">{group.existingArtist.artist_name}</div></div> : <span className="badge-pending">Will create</span>}</td><td className="text-right font-mono">{formatMoney(Number(group.existingArtist?.previous_carryover ?? 0), currency)}</td><td className="text-right font-mono">{group.statements.length}</td><td className="text-right font-mono font-semibold">{formatMoney(group.statements.reduce((sum, statement) => sum + Number(statement.finalDueResult?.amount ?? 0), 0), currency)}</td></tr>{expandedStatementGroup === group.key && <tr><td colSpan={7} className="!p-0"><div className="p-3" style={{ background: 'var(--ops-surface-2)' }}><table className="ops-table text-xs"><thead><tr><th>Contract Name</th><th>Contract ID</th><th>Statement ID</th><th>Payee Split %</th><th className="text-right">Net Payee Subtotal</th><th className="text-right">Raw Final Due</th><th className="text-right">Effective Final Due</th><th>Source / Check</th><th>Import Status</th></tr></thead><tbody>{group.statements.map(statement => {
+              const result = statement.finalDueResult
+              return <tr key={`${group.key}-${statement.statementId}`}><td>{statement.contractName}</td><td className="font-mono">{statement.contractId}</td><td className="font-mono">{statement.statementId}</td><td className="font-mono">{formatPercent(statement.payeeSplitPercent)}</td><td className="text-right font-mono">{statement.netPayeeSubtotal === null ? '—' : formatMoney(statement.netPayeeSubtotal, currency)}</td><td className="text-right font-mono">{statement.finalDue === null ? '—' : formatMoney(statement.finalDue, currency)}</td><td className="text-right font-mono font-semibold">{result ? formatMoney(result.amount, currency) : '—'}</td><td><span className={result?.needsVerification ? 'badge-warning' : 'badge-info'}>{result?.source || '—'}</span>{result?.needsVerification && <div className="text-[10px] text-amber-500">Verify before sending</div>}</td><td>{group.issue ? <span className="badge-critical">Import issue</span> : importedStatementIds.has(statement.statementId) ? <span className="badge-info">Will update</span> : <span className="badge-pending">New</span>}</td></tr>
             })}</tbody></table></div></td></tr>}</FragmentRow>)}</tbody></table></div>
             <div className="flex justify-between"><button className="btn-secondary" onClick={() => setStatementImportStep('period')}>Back</button><button className="btn-primary" disabled={saving || statementImportGroups.length === 0 || statementImportGroups.some(group => group.issue)} onClick={() => void commitEddyStatementImport()}><Upload size={13} /> Import {selectedStatementRows.length} Statements</button></div>
           </div>}
