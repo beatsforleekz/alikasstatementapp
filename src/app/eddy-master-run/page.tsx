@@ -404,6 +404,7 @@ export default function EddyMasterRunPage() {
       return sum + (closing < 0 ? closing : 0)
     }, 0),
     ready: artists.filter(artist => artist.status === 'ready').length,
+    toPrepare: artists.filter(artist => artist.status === 'to_prepare').length,
     sent: artists.filter(artist => artist.status === 'sent').length,
     carryForward: artists.filter(artist => artist.status === 'carry_forward').length,
   }), [artists])
@@ -1230,7 +1231,7 @@ export default function EddyMasterRunPage() {
             <StatCard label="Payable Closing" value={formatMoney(summary.payableClosing, currency)} color="blue" />
             <StatCard label="Positive Carry Forward" value={formatMoney(summary.positiveCarryForward, currency)} color="amber" />
             <StatCard label="Unrecouped Closing" value={formatMoney(summary.negativeClosing, currency)} color="red" />
-            <StatCard label="Ready" value={summary.ready} color="cyan" />
+            <StatCard label="Ready / Artists" value={`${summary.ready}/${summary.artistCount}`} sub={`${summary.toPrepare} still to prepare`} color="cyan" />
             <StatCard label="Sent" value={summary.sent} color="green" />
             <StatCard label="Carry Forward" value={summary.carryForward} color="amber" />
           </div>
