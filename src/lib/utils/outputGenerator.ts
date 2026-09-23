@@ -836,8 +836,9 @@ export function buildPrintableHTMLDocument(
   .mono { font-family: 'Courier New', monospace; font-size: 11px; }
   .footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid #ddd; font-size: 11px; color: #888; display: flex; justify-content: space-between; }
   @media print {
-    body { padding: 20px; }
-    @page { margin: 1.5cm; }
+    /* Zero page margins suppress browser-added title, date, URL and page footers. */
+    @page { size: auto; margin: 0; }
+    body { padding: 1.5cm; }
   }
 </style>
 </head>
@@ -1072,8 +1073,9 @@ function buildPublishingPackagePrintableHTMLDocument(data: PublishingPackageOutp
   .mono { font-family: 'Courier New', monospace; font-size: 11px; }
   .footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid #ddd; font-size: 11px; color: #888; display: flex; justify-content: space-between; }
   @media print {
-    body { padding: 20px; }
-    @page { margin: 1.5cm; }
+    /* Zero page margins suppress browser-added title, date, URL and page footers. */
+    @page { size: auto; margin: 0; }
+    body { padding: 1.5cm; }
   }
 </style>
 </head>
