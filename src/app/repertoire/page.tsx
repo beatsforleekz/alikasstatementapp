@@ -1189,7 +1189,7 @@ export default function RepertoirePage() {
                   const isWork = r.repertoire_type === 'work'
                   const isSelected = selectedIds.has(r.id)
                   const linkedContractCount = contractLinkCounts[r.id] ?? 0
-                  const showNeedsLinking = r.draft_status === 'needs_linking' && linkedContractCount === 0
+                  const showNeedsLinking = isWork && r.draft_status !== 'draft' && linkedContractCount === 0
                   return (
                     <tr
                       key={r.id}
