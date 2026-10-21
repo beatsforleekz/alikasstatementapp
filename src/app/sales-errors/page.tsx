@@ -18,7 +18,7 @@ import {
   type ContractRepertoireAllocationLink,
 } from '@/lib/utils/publishingAllocation'
 import { sortByLabel } from '@/lib/utils/sortOptions'
-import { getWriterNameOptions } from '@/lib/utils/writerNames'
+import { formatImportedWriterNames, getWriterNameOptions } from '@/lib/utils/writerNames'
 import {
   buildRepertoireMetadataPatch,
   type RepertoireMetadataSourceRow,
@@ -42,6 +42,7 @@ interface ImportRow {
   identifier_raw: string | null
   tempo_id?: string | null
   iswc?: string | null
+  writer_name_raw?: string | null
   income_type: string | null
   amount: number | null
   currency: string | null
@@ -1589,7 +1590,7 @@ function ResolutionPanel({
     const iswc = rawIdentifier && looksLikeISWC(rawIdentifier) ? rawIdentifier : ''
     return {
       title: row.title_raw ?? '',
-      writer_name: row.artist_name_raw ?? '',
+      writer_name: formatImportedWriterNames(row.writer_name_raw ?? row.payee_name_raw ?? row.artist_name_raw ?? ''),
       tempo_id: tempoId,
       iswc,
       artist_name: row.artist_name_raw ?? '',

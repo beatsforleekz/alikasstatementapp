@@ -1,5 +1,6 @@
 export type SonyPdfColKey =
   | 'title'
+  | 'writer'
   | 'tempo_id'
   | 'iswc'
   | 'mech'
@@ -35,6 +36,7 @@ export const SONY_PDF_BUCKET_MAP: Record<string, string> = {
 
 export const SONY_PDF_COL_FIELDS: SonyPdfColField[] = [
   { key: 'title', label: 'Song Title', required: true, isAmount: false },
+  { key: 'writer', label: 'Writer(s)', required: false, isAmount: false },
   { key: 'tempo_id', label: 'Tempo ID', required: false, isAmount: false },
   { key: 'iswc', label: 'ISWC (fallback)', required: false, isAmount: false },
   { key: 'mech', label: 'Mech', required: false, isAmount: true },
@@ -48,6 +50,7 @@ export const SONY_PDF_COL_FIELDS: SonyPdfColField[] = [
 
 export const SONY_PDF_HINTS: Partial<Record<SonyPdfColKey, string[]>> = {
   title: ['song_title', 'title', 'work_title', 'composition'],
+  writer: ['writer', 'writers', 'writer_name', 'songwriter', 'songwriters', 'composer'],
   tempo_id: ['tempo_id', 'song_id', 'sony_song_id', 'tempoid'],
   iswc: ['iswc', 'work_id', 'work_iswc'],
   mech: ['mech', 'mechanical', 'mech_royalty'],

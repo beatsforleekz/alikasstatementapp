@@ -526,6 +526,7 @@ export interface ImportRow {
   identifier_raw:        string | null
   tempo_id:              string | null
   iswc:                  string | null
+  writer_name_raw:       string | null
   country_raw:           string | null
   transaction_date:      string | null
   row_type:              string | null

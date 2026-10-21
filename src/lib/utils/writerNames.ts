@@ -2,7 +2,7 @@ export function getWriterNameOptions(values: Array<string | null | undefined>): 
   const names = new Map<string, string>()
 
   for (const value of values) {
-    for (const part of (value ?? '').split(',')) {
+    for (const part of formatImportedWriterNames(value ?? '').split(',')) {
       const name = part.replace(/\s*\(\d+(?:\.\d+)?%\)\s*$/, '').trim()
       if (!name) continue
       const key = name.toLocaleLowerCase()
@@ -11,4 +11,8 @@ export function getWriterNameOptions(values: Array<string | null | undefined>): 
   }
 
   return Array.from(names.values()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+}
+
+export function formatImportedWriterNames(value: string): string {
+  return value.replace(/;\s*NC:\s*/gi, ', ').trim()
 }

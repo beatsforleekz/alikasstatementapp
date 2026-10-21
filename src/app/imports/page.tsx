@@ -56,6 +56,7 @@ interface ParsedRow {
   identifier_raw: string | null
   tempo_id: string | null
   iswc: string | null
+  writer_name_raw?: string | null
   country_raw: string | null
   income_type: string | null
   amount: number | null
@@ -312,6 +313,7 @@ function expandSonyPdfRows(
     const raw = csvRows[srcIdx]
 
     const title = getCol(raw, 'title')
+    const writerName = getCol(raw, 'writer')
     const tempoId = getCol(raw, 'tempo_id')
     const iswc = getCol(raw, 'iswc')
 
@@ -359,6 +361,7 @@ function expandSonyPdfRows(
         identifier_raw:    tempoId || iswc || null,
         tempo_id:          tempoId || null,
         iswc:              iswc || null,
+        writer_name_raw:   writerName || null,
         payee_name_raw:    null as null,
         contract_name_raw: null as null,
         artist_name_raw:   null as null,
@@ -384,6 +387,7 @@ function expandSonyPdfRows(
         identifier_raw:        tempoId || iswc || null,
         tempo_id:              tempoId || null,
         iswc:                  iswc || null,
+        writer_name_raw:       writerName || null,
         country_raw:           null,
         income_type:           null,
         amount:                0,
@@ -416,6 +420,7 @@ function expandSonyPdfRows(
         identifier_raw:    tempoId || iswc || null,
         tempo_id:          tempoId || null,
         iswc:              iswc || null,
+        writer_name_raw:   writerName || null,
         payee_name_raw:    null as null,
         contract_name_raw: null as null,
         artist_name_raw:   null as null,
@@ -446,6 +451,7 @@ function expandSonyPdfRows(
         identifier_raw:        tempoId || iswc || null,
         tempo_id:              tempoId || null,
         iswc:                  iswc || null,
+        writer_name_raw:       writerName || null,
         country_raw:           null,
         income_type:           bucket.incomeType,
         amount,
@@ -1167,6 +1173,7 @@ export default function ImportsPage() {
         identifier_raw:        r.identifier_raw,
         tempo_id:              r.tempo_id,
         iswc:                  r.iswc,
+        writer_name_raw:       r.writer_name_raw ?? null,
         country_raw:           r.country_raw,
         income_type:           r.income_type,
         amount:                r.amount,
