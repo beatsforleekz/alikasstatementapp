@@ -524,6 +524,8 @@ export interface ImportRow {
   artist_name_raw:       string | null
   title_raw:             string | null
   identifier_raw:        string | null
+  tempo_id:              string | null
+  iswc:                  string | null
   country_raw:           string | null
   transaction_date:      string | null
   row_type:              string | null

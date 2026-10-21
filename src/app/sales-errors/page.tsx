@@ -17,6 +17,10 @@ import {
   type ContractRepertoireAllocationLink,
 } from '@/lib/utils/publishingAllocation'
 import { sortByLabel } from '@/lib/utils/sortOptions'
+import {
+  buildRepertoireMetadataPatch,
+  type RepertoireMetadataSourceRow,
+} from '@/lib/utils/repertoireEnrichment'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -35,6 +39,7 @@ interface ImportRow {
   title_raw: string | null
   identifier_raw: string | null
   tempo_id?: string | null
+  iswc?: string | null
   income_type: string | null
   amount: number | null
   currency: string | null
@@ -248,6 +253,31 @@ function getUnmatchedLabel(row: ImportRow, duplicateTitleIds: Set<string>): stri
   if (reason.includes('duplicate title')) return 'Duplicate title – multiple matches'
   if (reason.includes('ambiguous - identifier mismatch')) return 'Ambiguous – identifier mismatch'
   return 'Unmatched'
+}
+
+async function fillMissingRepertoireMetadata(
+  repertoireId: string,
+  rows: RepertoireMetadataSourceRow[],
+): Promise<string[]> {
+  const { data: current, error: fetchError } = await supabase
+    .from('repertoire')
+    .select('tempo_id,iswc')
+    .eq('id', repertoireId)
+    .single()
+
+  if (fetchError || !current) throw fetchError ?? new Error('Matched repertoire work was not found.')
+
+  const patch = buildRepertoireMetadataPatch(current, rows)
+  const fields = Object.keys(patch)
+  if (fields.length === 0) return []
+
+  const { error: updateError } = await supabase
+    .from('repertoire')
+    .update(patch)
+    .eq('id', repertoireId)
+
+  if (updateError) throw updateError
+  return fields
 }
 
 // ── Main page ─────────────────────────────────────────────────────────────────
@@ -730,6 +760,16 @@ export default function SalesErrorsPage() {
       .in('id', ids)
 
     if (upErr) { setError(upErr.message); return }
+
+    try {
+      const sourceRows = ids
+        .map(id => errorRows.find(row => row.id === id))
+        .filter((row): row is ImportRow => !!row)
+      await fillMissingRepertoireMetadata(repId, sourceRows)
+    } catch (metadataError: any) {
+      setError(`Rows were matched, but catalogue metadata could not be updated: ${metadataError.message}`)
+      return
+    }
 
     // Verify how many actually cleared
     const { data: stillUnresolved } = await supabase
@@ -1632,10 +1672,26 @@ function ResolutionPanel({
         .in('id', siblingIds)
       if (upErr) { setError(upErr.message); setSaving(false); return }
 
+      let enrichedFields: string[] = []
+      try {
+        const sourceRows = siblingIds
+          .map(id => allRows.find(sourceRow => sourceRow.id === id))
+          .filter((sourceRow): sourceRow is ImportRow => !!sourceRow)
+        enrichedFields = await fillMissingRepertoireMetadata(selectedRepId, sourceRows)
+      } catch (metadataError: any) {
+        setError(`Work was matched, but catalogue metadata could not be updated: ${metadataError.message}`)
+        setSaving(false)
+        return
+      }
+
       const workTitle = selectedRep?.title ?? selectedRepId
-      const toast = hasContractPath(selectedRepId, contracts, contractRepertoireLinks, splits)
+      const baseToast = hasContractPath(selectedRepId, contracts, contractRepertoireLinks, splits)
         ? `Matched to "${workTitle}".`
         : `Matched to "${workTitle}". No active publishing contract path exists yet.`
+      const enrichedLabel = enrichedFields
+        .map(field => field === 'tempo_id' ? 'Tempo ID' : 'ISWC')
+        .join(' and ')
+      const toast = enrichedLabel ? `${baseToast} Added missing ${enrichedLabel}.` : baseToast
 
       setSaving(false)
       onResolved(siblingIds, errorType, toast)

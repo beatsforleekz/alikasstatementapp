@@ -54,6 +54,8 @@ interface ParsedRow {
   artist_name_raw: string | null
   title_raw: string | null
   identifier_raw: string | null
+  tempo_id: string | null
+  iswc: string | null
   country_raw: string | null
   income_type: string | null
   amount: number | null
@@ -380,6 +382,8 @@ function expandSonyPdfRows(
         artist_name_raw:       null,
         title_raw:             title || null,
         identifier_raw:        tempoId || iswc || null,
+        tempo_id:              tempoId || null,
+        iswc:                  iswc || null,
         country_raw:           null,
         income_type:           null,
         amount:                0,
@@ -440,6 +444,8 @@ function expandSonyPdfRows(
         artist_name_raw:       null,
         title_raw:             title || null,
         identifier_raw:        tempoId || iswc || null,
+        tempo_id:              tempoId || null,
+        iswc:                  iswc || null,
         country_raw:           null,
         income_type:           bucket.incomeType,
         amount,
@@ -1033,7 +1039,7 @@ export default function ImportsPage() {
           title_raw:         get('title_raw'),
           identifier_raw:    chosenIdentifier,
           tempo_id:          domain === 'publishing' ? tempoIdentifier : null,
-          iswc:              domain === 'publishing' && !tempoIdentifier && looksLikeISWC(fallbackIdentifier) ? fallbackIdentifier : null,
+          iswc:              domain === 'publishing' && looksLikeISWC(fallbackIdentifier) ? fallbackIdentifier : null,
           country_raw:       get('country_raw'),
           row_type:          get('row_type'),
           income_type,
@@ -1057,6 +1063,8 @@ export default function ImportsPage() {
           artist_name_raw:       partial.artist_name_raw ?? null,
           title_raw:             partial.title_raw ?? null,
           identifier_raw:        partial.identifier_raw ?? null,
+          tempo_id:              partial.tempo_id ?? null,
+          iswc:                  partial.iswc ?? null,
           country_raw:           partial.country_raw ?? null,
           income_type,
           amount,
@@ -1157,6 +1165,8 @@ export default function ImportsPage() {
         artist_name_raw:       r.artist_name_raw,
         title_raw:             r.title_raw,
         identifier_raw:        r.identifier_raw,
+        tempo_id:              r.tempo_id,
+        iswc:                  r.iswc,
         country_raw:           r.country_raw,
         income_type:           r.income_type,
         amount:                r.amount,
@@ -1177,6 +1187,7 @@ export default function ImportsPage() {
         warning_reason:        r.warning_reason,
         excluded_flag:         false,
         net_amount:            r.amount,
+        raw_payload_json:       r._raw,
       }))
       const { error: bErr } = await supabase.from('import_rows').insert(batch)
       if (bErr) { setError(bErr.message); setSaving(false); return }
