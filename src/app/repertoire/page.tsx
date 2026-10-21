@@ -3,9 +3,11 @@ import React, { useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase/client'
 import { Alert, LoadingSpinner, EmptyState } from '@/components/ui'
+import { WriterNameAutocomplete } from '@/components/WriterNameAutocomplete'
 import { BookOpen, Plus, Search, RefreshCw, Upload, FileDown, X, Link2, AlertTriangle, Trash2, CheckCircle } from 'lucide-react'
 import { isPublishingContractType, type Repertoire } from '@/lib/types'
 import { sortByLabel } from '@/lib/utils/sortOptions'
+import { getWriterNameOptions } from '@/lib/utils/writerNames'
 
 interface PayeeMin { id: string; payee_name: string }
 
@@ -801,6 +803,7 @@ export default function RepertoirePage() {
   const [totalCount, setTotalCount]         = useState(0)
   const [payees, setPayees]                 = useState<PayeeMin[]>([])
   const [contracts, setContracts]           = useState<ContractMin[]>([])
+  const [writerOptions, setWriterOptions]   = useState<string[]>([])
   const [search, setSearch]                 = useState('')
   const [typeFilter, setTypeFilter]         = useState('')
   const [draftFilter, setDraftFilter]       = useState('')
@@ -905,12 +908,17 @@ export default function RepertoirePage() {
   }
 
   const loadReferenceData = async () => {
-    const [payeeRes, contractRes] = await Promise.all([
+    const [payeeRes, contractRes, writerRes] = await Promise.all([
       supabase.from('payees').select('id, payee_name').order('payee_name'),
       supabase.from('contracts').select('id, contract_name, contract_code, contract_type, status').order('contract_name'),
+      supabase.from('repertoire').select('writer_name').eq('repertoire_type', 'work').not('writer_name', 'is', null).range(0, 4999),
     ])
     setPayees(sortByLabel(payeeRes.data ?? [], payee => payee.payee_name))
     setContracts(sortByLabel(contractRes.data ?? [], contract => `${contract.contract_name}${contract.contract_code ? ` (${contract.contract_code})` : ''}`))
+    setWriterOptions(getWriterNameOptions([
+      ...(writerRes.data ?? []).map(row => row.writer_name),
+      ...(payeeRes.data ?? []).map(payee => payee.payee_name),
+    ]))
   }
 
   const loadPage = async (page = currentPage) => {
@@ -1359,6 +1367,7 @@ export default function RepertoirePage() {
           prefillRow={prefillRow}
           payees={payees}
           contracts={contracts}
+          writerOptions={writerOptions}
           onClose={() => { setShowForm(false); setEditingItem(null); setPrefillRow(null); reloadCounts() }}
           onSaved={() => { setShowForm(false); setEditingItem(null); setPrefillRow(null); void loadPage() }}
           onLinksChanged={reloadCounts}
@@ -1391,11 +1400,12 @@ export default function RepertoirePage() {
 
 // ── Repertoire form modal ─────────────────────────────────────────────────────
 
-function RepertoireFormModal({ item, prefillRow, payees, contracts, onClose, onSaved, onLinksChanged }: {
+function RepertoireFormModal({ item, prefillRow, payees, contracts, writerOptions, onClose, onSaved, onLinksChanged }: {
   item: Repertoire | null
   prefillRow: any | null
   payees: PayeeMin[]
   contracts: ContractMin[]
+  writerOptions: string[]
   onClose: () => void
   onSaved: () => void
   onLinksChanged?: () => void
@@ -1585,11 +1595,12 @@ function RepertoireFormModal({ item, prefillRow, payees, contracts, onClose, onS
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
                   {writers.map((w, i) => (
                     <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 80px 24px', gap: 5, alignItems: 'center' }}>
-                      <input
+                      <WriterNameAutocomplete
                         className="ops-input text-xs"
                         placeholder={`Writer ${i + 1} name`}
                         value={w.name}
-                        onChange={e => setWriters(prev => prev.map((x, j) => j === i ? { ...x, name: e.target.value } : x))}
+                        options={writerOptions}
+                        onChange={name => setWriters(prev => prev.map((x, j) => j === i ? { ...x, name } : x))}
                       />
                       <div style={{ position: 'relative' }}>
                         <input

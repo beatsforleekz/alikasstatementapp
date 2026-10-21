@@ -4,6 +4,7 @@ import { supabase } from '@/lib/supabase/client'
 import {
   Alert, LoadingSpinner, DomainBadge, EmptyState, StatCard, getNoticePanelStyle,
 } from '@/components/ui'
+import { WriterNameAutocomplete } from '@/components/WriterNameAutocomplete'
 import {
   AlertTriangle, CheckCircle, RefreshCw, Search, Link2, Play,
   ExternalLink, X, Plus,
@@ -17,6 +18,7 @@ import {
   type ContractRepertoireAllocationLink,
 } from '@/lib/utils/publishingAllocation'
 import { sortByLabel } from '@/lib/utils/sortOptions'
+import { getWriterNameOptions } from '@/lib/utils/writerNames'
 import {
   buildRepertoireMetadataPatch,
   type RepertoireMetadataSourceRow,
@@ -1598,6 +1600,10 @@ function ResolutionPanel({
   // Live DB search results
   const [repResults, setRepResults] = useState<Repertoire[]>([])
   const [repSearching, setRepSearching] = useState(false)
+  const writerOptions = getWriterNameOptions([
+    ...repertoire.map(item => item.writer_name),
+    ...payees.map(payee => payee.payee_name),
+  ])
 
   function normIdStr(s: string | null | undefined): string {
     if (!s) return ''
@@ -1919,7 +1925,14 @@ function ResolutionPanel({
                     </div>
                     <div className="col-span-2">
                       <label className="form-label">Writer(s) *</label>
-                      <input className="input-field" value={createForm.writer_name} onChange={e => setCreateField('writer_name', e.target.value)} placeholder="Comma-separated if multiple" />
+                      <WriterNameAutocomplete
+                        className="input-field"
+                        value={createForm.writer_name}
+                        options={writerOptions}
+                        onChange={value => setCreateField('writer_name', value)}
+                        placeholder="Type or select writers; separate multiple names with commas"
+                        multiple
+                      />
                     </div>
                     <div>
                       <label className="form-label">Tempo ID</label>
