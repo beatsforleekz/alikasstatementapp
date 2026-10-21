@@ -656,6 +656,13 @@ export default function SalesErrorsPage() {
     // A work has a linked contract if ANY row exists in contract_repertoire_links
     // for its repertoire_id — no is_active column exists on this table.
     let updatedCount = 0
+    const metadataRowsByRepertoire = new Map<string, ImportRow[]>()
+    const queueMetadataEnrichment = (repertoireId: string | null, sourceRow: ImportRow) => {
+      if (!repertoireId) return
+      const rows = metadataRowsByRepertoire.get(repertoireId) ?? []
+      rows.push(sourceRow)
+      metadataRowsByRepertoire.set(repertoireId, rows)
+    }
     const BATCH = 50
     for (let i = 0; i < rowsToMatch.length; i += BATCH) {
       const batch = rowsToMatch.slice(i, i + BATCH)
@@ -672,7 +679,10 @@ export default function SalesErrorsPage() {
             warning_flag: !hasLink,
             warning_reason: !hasLink ? 'Matched to repertoire but no active publishing contract path exists yet.' : null,
           }).eq('id', r.id)
-          if (!upErr) updatedCount++
+          if (!upErr) {
+            updatedCount++
+            queueMetadataEnrichment(r.matched_repertoire_id, r)
+          }
           continue
         }
 
@@ -700,7 +710,18 @@ export default function SalesErrorsPage() {
           normalized_title:      result.normalized_title,
           normalized_identifier: result.normalized_identifier,
         }).eq('id', r.id)
-        if (!upErr) updatedCount++
+        if (!upErr) {
+          updatedCount++
+          queueMetadataEnrichment(repId, r)
+        }
+      }
+    }
+
+    for (const [repertoireId, sourceRows] of Array.from(metadataRowsByRepertoire.entries())) {
+      try {
+        await fillMissingRepertoireMetadata(repertoireId, sourceRows)
+      } catch (metadataError: any) {
+        setError(`Rows were matched, but catalogue metadata could not be updated: ${metadataError.message}`)
       }
     }
     return updatedCount
