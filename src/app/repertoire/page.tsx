@@ -32,6 +32,11 @@ interface CRLink {
 
 const PAGE_SIZE = 50
 
+const pageFromQuery = (value: string | null): number => {
+  const parsed = Number.parseInt(value ?? '', 10)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 1
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const parseShare = (v: string): number | null => {
@@ -799,7 +804,7 @@ export default function RepertoirePage() {
   const [search, setSearch]                 = useState('')
   const [typeFilter, setTypeFilter]         = useState('')
   const [draftFilter, setDraftFilter]       = useState('')
-  const [currentPage, setCurrentPage]       = useState(1)
+  const [currentPage, setCurrentPage]       = useState(() => pageFromQuery(searchParams.get('page')))
   const [showForm, setShowForm]               = useState(false)
   const [showCatalogueImport, setShowCatalogueImport] = useState(false)
   const [editingItem, setEditingItem]         = useState<Repertoire | null>(null)
@@ -816,6 +821,16 @@ export default function RepertoirePage() {
 
   useEffect(() => { void loadReferenceData() }, [])
   useEffect(() => { void loadPage() }, [currentPage, search, typeFilter, draftFilter])
+  useEffect(() => {
+    const queryPage = pageFromQuery(searchParams.get('page'))
+    if (queryPage === currentPage && (currentPage > 1 || !searchParams.has('page'))) return
+
+    const nextParams = new URLSearchParams(searchParams.toString())
+    if (currentPage > 1) nextParams.set('page', String(currentPage))
+    else nextParams.delete('page')
+    const next = nextParams.toString()
+    router.replace(next ? `/repertoire?${next}` : '/repertoire', { scroll: false })
+  }, [currentPage, router, searchParams])
   useEffect(() => {
     const nextTotalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
     if (currentPage > nextTotalPages) setCurrentPage(nextTotalPages)
@@ -1173,6 +1188,8 @@ export default function RepertoirePage() {
                 {filtered.map((r, rowIdx) => {
                   const isWork = r.repertoire_type === 'work'
                   const isSelected = selectedIds.has(r.id)
+                  const linkedContractCount = contractLinkCounts[r.id] ?? 0
+                  const showNeedsLinking = r.draft_status === 'needs_linking' && linkedContractCount === 0
                   return (
                     <tr
                       key={r.id}
@@ -1198,7 +1215,7 @@ export default function RepertoirePage() {
                       </td>
                       <td className="text-xs font-medium">
                         {r.title}
-                        {(r.draft_status === 'draft' || r.draft_status === 'needs_linking') && (
+                        {(r.draft_status === 'draft' || showNeedsLinking) && (
                           <span className="ml-1 badge badge-pending text-[10px]">
                             {r.draft_status === 'draft' ? 'Draft' : 'Needs Linking'}
                           </span>
@@ -1221,7 +1238,7 @@ export default function RepertoirePage() {
                       <td className="font-mono text-xs text-ops-subtle">{r.internal_code ?? '—'}</td>
                       <td className="text-xs">
                         {r.repertoire_type === 'work' ? (() => {
-                          const n = contractLinkCounts[r.id] ?? 0
+                          const n = linkedContractCount
                           if (n === 0) return (
                             <span style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--ops-muted)', fontSize: 11 }}>
                               <Link2 size={10} /> <span style={{ color: 'var(--ops-subtle)' }}>0 linked</span>
